@@ -181,9 +181,49 @@ class IconResizerViewModel: ObservableObject {
         self.isProcessing = true
         self.statusMessage = "🔄 Resizing icons..."
         
+        // Try default location first, fallback to save panel if permission denied
+        let outputFolderURL = URL(fileURLWithPath: self.outputDirectory)
+        let fileManager = FileManager.default
+        
+        do {
+            try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
+            // Success - proceed with default location
+            self.performIconProcessing(sourceImage: sourceImage, outputFolderURL: outputFolderURL)
+        } catch {
+            // Permission denied - use save panel
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.showSavePanelForIcons(sourceImage: sourceImage)
+            }
+        }
+    }
+    
+    private func showSavePanelForIcons(sourceImage: NSImage) {
+        let savePanel = NSOpenPanel()
+        savePanel.title = "Choose Output Folder"
+        savePanel.message = "Select where to save the app icons"
+        savePanel.canChooseFiles = false
+        savePanel.canChooseDirectories = true
+        savePanel.canCreateDirectories = true
+        savePanel.allowsMultipleSelection = false
+        
+        // Default to Desktop
+        savePanel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+        
+        savePanel.begin { response in
+            guard response == .OK, let selectedURL = savePanel.url else {
+                self.statusMessage = "❌ Cancelled"
+                return
+            }
+            
+            self.isProcessing = true
+            self.statusMessage = "🔄 Resizing icons..."
+            self.performIconProcessing(sourceImage: sourceImage, outputFolderURL: selectedURL)
+        }
+    }
+    
+    private func performIconProcessing(sourceImage: NSImage, outputFolderURL: URL) {
         DispatchQueue.global(qos: .userInitiated).async {
-            // Save directly to Apple Icons folder
-            let outputFolderURL = URL(fileURLWithPath: self.outputDirectory)
             let fileManager = FileManager.default
             
             do {
@@ -313,16 +353,59 @@ class IconResizerViewModel: ObservableObject {
         self.isProcessing = true
         self.statusMessage = "🔄 Resizing \(images.count) screenshots..."
         
+        // Try default location first, fallback to save panel if permission denied
+        let baseFolder = URL(fileURLWithPath: self.outputDirectory)
+        let defaultOutputURL = baseFolder.appendingPathComponent("\(self.screenshotPlatform.rawValue)_Screenshots")
+        let fileManager = FileManager.default
+        
+        // Test if we can write to the default location
+        do {
+            try fileManager.createDirectory(at: defaultOutputURL, withIntermediateDirectories: true)
+            // Success - proceed with default location
+            self.performScreenshotProcessing(images: images, outputFolderURL: defaultOutputURL)
+        } catch {
+            // Permission denied - use save panel to let user choose location
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.showSavePanelForScreenshots(images: images)
+            }
+        }
+    }
+    
+    private func showSavePanelForScreenshots(images: [NSImage]) {
+        let savePanel = NSOpenPanel()
+        savePanel.title = "Choose Output Folder"
+        savePanel.message = "Select where to save the \(images.count) screenshots"
+        savePanel.canChooseFiles = false
+        savePanel.canChooseDirectories = true
+        savePanel.canCreateDirectories = true
+        savePanel.allowsMultipleSelection = false
+        
+        // Default to Desktop
+        savePanel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+        
+        savePanel.begin { response in
+            guard response == .OK, let selectedURL = savePanel.url else {
+                self.statusMessage = "❌ Cancelled"
+                return
+            }
+            
+            let outputFolderURL = selectedURL.appendingPathComponent("\(self.screenshotPlatform.rawValue)_Screenshots")
+            self.isProcessing = true
+            self.statusMessage = "🔄 Resizing \(images.count) screenshots..."
+            self.performScreenshotProcessing(images: images, outputFolderURL: outputFolderURL)
+        }
+    }
+    
+    private func performScreenshotProcessing(images: [NSImage], outputFolderURL: URL) {
         DispatchQueue.global(qos: .userInitiated).async {
-            // Save directly to Apple Icons folder with platform subfolder
-            let baseFolder = URL(fileURLWithPath: self.outputDirectory)
-            let outputFolderURL = baseFolder.appendingPathComponent("\(self.screenshotPlatform.rawValue)_Screenshots")
             let fileManager = FileManager.default
             
             do {
                 try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
                 
                 var totalGenerated = 0
+                var permissionErrorOccurred = false
                 let platformName: String
                 
                 switch self.screenshotPlatform {
@@ -357,12 +440,35 @@ class IconResizerViewModel: ObservableObject {
                             // Include image number in filename: Screenshot_01_1242x2688.png
                             let filename = "Screenshot_\(String(format: "%02d", imageNumber))_\(Int(config.width))x\(Int(config.height)).png"
                             let fileURL = outputFolderURL.appendingPathComponent(filename)
-                            if self.savePNG(image: resizedImage, to: fileURL) {
+                            
+                            // Check for permission errors
+                            if let error = self.savePNGWithError(image: resizedImage, to: fileURL) {
+                                // Check if it's a permission error
+                                let nsError = error as NSError
+                                if nsError.domain == NSCocoaErrorDomain && nsError.code == 513 {
+                                    permissionErrorOccurred = true
+                                    break // Exit inner loop
+                                }
+                            } else {
                                 totalGenerated += 1
                                 print("✅ Screenshot \(imageNumber): \(filename)")
                             }
                         }
                     }
+                    
+                    // Exit outer loop if permission error occurred
+                    if permissionErrorOccurred {
+                        break
+                    }
+                }
+                
+                // If permission error occurred, show save panel
+                if permissionErrorOccurred {
+                    DispatchQueue.main.async {
+                        self.isProcessing = false
+                        self.showSavePanelForScreenshots(images: images)
+                    }
+                    return
                 }
                 
                 DispatchQueue.main.async {
@@ -375,7 +481,7 @@ class IconResizerViewModel: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     self.isProcessing = false
-                    self.statusMessage = "❌ Error: \(error.localizedDescription)"
+                    self.showSavePanelForScreenshots(images: images)
                 }
             }
         }
@@ -544,18 +650,22 @@ class IconResizerViewModel: ObservableObject {
     }
     
     private func savePNG(image: NSImage, to url: URL) -> Bool {
+        return savePNGWithError(image: image, to: url) == nil
+    }
+    
+    private func savePNGWithError(image: NSImage, to url: URL) -> Error? {
         guard let tiffData = image.tiffRepresentation,
               let bitmapImage = NSBitmapImageRep(data: tiffData),
               let pngData = bitmapImage.representation(using: .png, properties: [:]) else {
-            return false
+            return NSError(domain: "IconResizer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert image to PNG"])
         }
         
         do {
             try pngData.write(to: url)
-            return true
+            return nil
         } catch {
             print("❌ Failed to save \(url.lastPathComponent): \(error)")
-            return false
+            return error
         }
     }
     

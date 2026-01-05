@@ -105,7 +105,9 @@ struct ContentView: View {
             if resizer.lastOutputFolder != nil {
                 Button(action: {
                     if let folder = resizer.lastOutputFolder {
-                        NSWorkspace.shared.open(folder)
+                        // Use activateFileViewerSelecting to reveal folder in Finder
+                        // This doesn't require special permissions like open() does
+                        NSWorkspace.shared.activateFileViewerSelecting([folder])
                     }
                 }) {
                     Label("Open Output Folder", systemImage: "folder")
