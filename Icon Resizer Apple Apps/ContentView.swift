@@ -15,16 +15,14 @@ struct ContentView: View {
         VStack(spacing: 20) {
             // Header
             VStack(spacing: 8) {
-                Image(systemName: resizer.operationMode == .icons ? "photo.on.rectangle.angled" : "photo.stack")
+                Image(systemName: headerSymbol(for: resizer.operationMode))
                     .font(.system(size: 60))
                     .foregroundColor(.blue)
                 
-                Text(resizer.operationMode == .icons ? "Icon Resizer" : "Screenshot Resizer")
+                Text(headerTitle(for: resizer.operationMode))
                     .font(.largeTitle.bold())
                 
-                Text(resizer.operationMode == .icons ? 
-                     "Drag & drop a 1024x1024 PNG to generate all app icon sizes" :
-                     "Drop multiple screenshots - orientation auto-detected")
+                Text(headerSubtitle(for: resizer.operationMode))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -38,7 +36,7 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .padding(.horizontal, 120)
+            .padding(.horizontal, 40)
             
             // Platform selector (conditional based on mode)
             if resizer.operationMode == .icons {
@@ -49,7 +47,7 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 80)
-            } else {
+            } else if resizer.operationMode == .screenshots {
                 Picker("Device", selection: $resizer.screenshotPlatform) {
                     ForEach(ScreenshotPlatform.allCases, id: \.self) { platform in
                         Text(platform.rawValue).tag(platform)
@@ -121,7 +119,15 @@ struct ContentView: View {
             
             // Info
             VStack(alignment: .leading, spacing: 4) {
-                if resizer.operationMode == .icons {
+                if resizer.operationMode == .blogHeaders {
+                    Text("Generates (aspect-fill, no stretch):")
+                        .font(.caption.bold())
+                    Text("• 1200 × 630px — OG / share card")
+                    Text("• 1600 × 900px — 16:9 retina")
+                    Text("• 1024 × 576px — 16:9 lighter")
+                    Text("• Saved to Desktop/Apple Icons/BlogHeaders/")
+                        .foregroundColor(.green)
+                } else if resizer.operationMode == .icons {
                     Text("Generates:")
                         .font(.caption.bold())
                     
@@ -182,7 +188,34 @@ struct ContentView: View {
             .padding(.horizontal, 40)
             .padding(.bottom, 20)
         }
-        .frame(width: 500, height: 680)
+        .frame(width: 500, height: 720)
+    }
+    
+    private func headerSymbol(for mode: OperationMode) -> String {
+        switch mode {
+        case .icons: return "photo.on.rectangle.angled"
+        case .screenshots: return "photo.stack"
+        case .blogHeaders: return "rectangle.expand.vertical"
+        }
+    }
+    
+    private func headerTitle(for mode: OperationMode) -> String {
+        switch mode {
+        case .icons: return "Icon Resizer"
+        case .screenshots: return "Screenshot Resizer"
+        case .blogHeaders: return "Web header export"
+        }
+    }
+    
+    private func headerSubtitle(for mode: OperationMode) -> String {
+        switch mode {
+        case .icons:
+            return "Drag & drop a 1024x1024 PNG to generate all app icon sizes"
+        case .screenshots:
+            return "Drop multiple screenshots - orientation auto-detected"
+        case .blogHeaders:
+            return "Drop one PNG — images are scaled and center-cropped to each preset (like object-cover)"
+        }
     }
 }
 

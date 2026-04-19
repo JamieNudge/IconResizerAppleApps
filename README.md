@@ -8,6 +8,7 @@ A macOS app that generates properly formatted AppIcon.appiconset folders for iOS
 - **macOS Support**: Generates all 10 required icon sizes (16x16 to 1024x1024 at 1x and 2x)
 - **Xcode-Ready**: Creates proper `AppIcon.appiconset` folders with `Contents.json`
 - **Drag & Drop**: Simple interface - just drag a 1024x1024 PNG
+- **Web headers**: One mode exports blog / OG images at fixed sizes using **aspect-fill** (uniform scale + center crop, no stretch). See [REPO_AND_BUILDS.md](REPO_AND_BUILDS.md) if your local build differs from GitHub `main`.
 
 ## 🚀 How to Use
 
@@ -16,18 +17,30 @@ A macOS app that generates properly formatted AppIcon.appiconset folders for iOS
 - Make sure it has a transparent background if needed
 - Square aspect ratio is required
 
-### Step 2: Generate Icons
-1. Launch the **Icon Resizer Apple Apps**
-2. Select your platform:
-   - **iOS Universal**: Modern iOS (single icon for all devices) - 3 sizes
-   - **iOS Only**: Traditional iPhone & iPad icons - 18 sizes
-   - **macOS Only**: Mac app icons - 10 sizes
-   - **iOS + macOS**: Both traditional iOS and macOS
-3. **Drag and drop** your 1024x1024 PNG into the app
-4. Choose where to save the output
-5. Click **Open Output Folder** to view generated icons
+### Step 2: Generate output
+1. Launch **Icon Resizer Apple Apps**.
+2. In the mode control, choose **App Icons**, **App Screenshots**, or **Web headers**.
+3. **App Icons**: pick **iOS Universal**, **iOS Only**, **macOS Only**, or **iOS + macOS**. **App Screenshots**: pick **iPhone**, **iPad**, or **Apple Watch**. **Web headers**: no extra picker.
+4. **Drag and drop** PNGs: one **1024×1024** for icons; one or more for screenshots; **one** image of any size or aspect for web headers.
+5. If the default output folder is unavailable, choose where to save when prompted.
+6. Click **Open Output Folder** to reveal the last output folder in Finder.
 
-### Step 3: Add to Xcode Project
+### Web headers (blog / OG)
+
+1. Select **Web headers** in the mode control.
+2. Drop **one** PNG (any size or aspect).
+3. Output is written to **`BlogHeaders/`** under the same base folder as icons (default: `~/Desktop/Apple Icons/BlogHeaders/`).
+4. Files (PNG):
+
+| File | Size | Typical use |
+|------|------|-------------|
+| `header-1200x630.png` | 1200×630 | Open Graph / social share cards |
+| `header-1600x900.png` | 1600×900 | Wide 16:9 hero / retina |
+| `header-1024x576.png` | 1024×576 | Lighter 16:9 variant |
+
+Resizing uses **aspect-fill**: the image is scaled uniformly and **center-cropped** to each target rectangle (no squashing). This matches common site behaviour such as CSS `object-fit: cover`.
+
+### Step 3: Add to Xcode Project (icons only)
 
 #### For macOS Apps:
 1. Open your Xcode project
@@ -157,7 +170,7 @@ To fix the missing icons in your PREPBNOH2H project:
 
 ---
 
-**Version**: 2.0  
-**Updated**: December 2025  
+**Version**: 2.2  
+**Updated**: April 2026  
 **Compatibility**: macOS 13+, Xcode 15+
 

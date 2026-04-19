@@ -1,5 +1,19 @@
 # Icon Resizer Apple Apps - Updates
 
+## April 2026 — v2.2 (Web headers)
+
+### Web headers mode
+- New **Web headers** operation mode (alongside App Icons and App Screenshots).
+- Drop a single PNG; exports **`BlogHeaders/`** with:
+  - `header-1200x630.png` — OG / share card
+  - `header-1600x900.png` — 16:9 retina
+  - `header-1024x576.png` — 16:9 lighter
+- **`resizeAspectFill`**: uniform scale + center crop (no non-uniform stretch), aligned with typical `object-cover` behaviour.
+- UI: third segmented option, footer copy listing sizes and default path.
+- **`REPO_AND_BUILDS.md`**: notes that GitHub `main` is canonical if a local build shows divergent UI (e.g. Android store toggle).
+
+---
+
 ## 🎉 December 2025 Update - v2.1 (iOS Universal Support)
 
 ### 🆕 NEW: iOS Universal Icons

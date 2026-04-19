@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 enum OperationMode: String, CaseIterable {
     case icons = "App Icons"
     case screenshots = "App Screenshots"
+    case blogHeaders = "Web headers"
 }
 
 enum PlatformSelection: String, CaseIterable {
@@ -151,29 +152,111 @@ class IconResizerViewModel: ObservableObject {
         ScreenshotConfig(filename: "Watch-Series3-312x390.png", width: 312, height: 390, description: "Series 3/4/5")
     ]
     
+    /// Blog / web header exports (aspect-fill crop, no stretch). Written under `BlogHeaders/`.
+    let blogHeaderSizes: [ScreenshotConfig] = [
+        ScreenshotConfig(filename: "header-1200x630.png", width: 1200, height: 630, description: "OG / share card"),
+        ScreenshotConfig(filename: "header-1600x900.png", width: 1600, height: 900, description: "16:9 retina"),
+        ScreenshotConfig(filename: "header-1024x576.png", width: 1024, height: 576, description: "16:9 lighter")
+    ]
+    
     func handleDrop(providers: [NSItemProvider]) {
-        if operationMode == .icons {
-            // Icons: use first image only
+        let mode = operationMode
+        switch mode {
+        case .icons, .blogHeaders:
             guard let provider = providers.first else { return }
-            
             provider.loadDataRepresentation(forTypeIdentifier: UTType.png.identifier) { data, error in
                 DispatchQueue.main.async {
                     if let error = error {
                         self.statusMessage = "❌ Error: \(error.localizedDescription)"
                         return
                     }
-                    
                     guard let data = data, let nsImage = NSImage(data: data) else {
                         self.statusMessage = "❌ Could not load image"
                         return
                     }
-                    
-                    self.resizeAndSaveIcons(sourceImage: nsImage)
+                    switch mode {
+                    case .icons:
+                        self.resizeAndSaveIcons(sourceImage: nsImage)
+                    case .blogHeaders:
+                        self.resizeAndSaveBlogHeaders(sourceImage: nsImage)
+                    case .screenshots:
+                        break
+                    }
                 }
             }
-        } else {
-            // Screenshots: process ALL dropped images
-            self.resizeAndSaveMultipleScreenshots(providers: providers)
+        case .screenshots:
+            resizeAndSaveMultipleScreenshots(providers: providers)
+        }
+    }
+    
+    private func resizeAndSaveBlogHeaders(sourceImage: NSImage) {
+        self.isProcessing = true
+        self.statusMessage = "🔄 Generating web headers..."
+        
+        let baseFolder = URL(fileURLWithPath: self.outputDirectory)
+        let outputFolderURL = baseFolder.appendingPathComponent("BlogHeaders", isDirectory: true)
+        let fileManager = FileManager.default
+        
+        do {
+            try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
+            self.performBlogHeaderProcessing(sourceImage: sourceImage, outputFolderURL: outputFolderURL)
+        } catch {
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.showSavePanelForBlogHeaders(sourceImage: sourceImage)
+            }
+        }
+    }
+    
+    private func showSavePanelForBlogHeaders(sourceImage: NSImage) {
+        let savePanel = NSOpenPanel()
+        savePanel.title = "Choose Output Folder"
+        savePanel.message = "Select where to save the BlogHeaders folder"
+        savePanel.canChooseFiles = false
+        savePanel.canChooseDirectories = true
+        savePanel.canCreateDirectories = true
+        savePanel.allowsMultipleSelection = false
+        savePanel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+        
+        savePanel.begin { response in
+            guard response == .OK, let selectedURL = savePanel.url else {
+                self.statusMessage = "❌ Cancelled"
+                return
+            }
+            let outputFolderURL = selectedURL.appendingPathComponent("BlogHeaders", isDirectory: true)
+            self.isProcessing = true
+            self.statusMessage = "🔄 Generating web headers..."
+            self.performBlogHeaderProcessing(sourceImage: sourceImage, outputFolderURL: outputFolderURL)
+        }
+    }
+    
+    private func performBlogHeaderProcessing(sourceImage: NSImage, outputFolderURL: URL) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fileManager = FileManager.default
+            do {
+                try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
+                var totalGenerated = 0
+                for config in self.blogHeaderSizes {
+                    if let resized = self.resizeAspectFill(image: sourceImage, width: config.width, height: config.height) {
+                        let fileURL = outputFolderURL.appendingPathComponent(config.filename)
+                        if self.savePNG(image: resized, to: fileURL) {
+                            totalGenerated += 1
+                            print("✅ Web header: \(config.filename)")
+                        }
+                    }
+                }
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.statusMessage = "✅ Generated \(totalGenerated) web header images (aspect-fill crop)"
+                    self.lastOutputFolder = outputFolderURL
+                    print("📂 Blog headers: \(outputFolderURL.path)")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.statusMessage = "❌ Error: \(error.localizedDescription)"
+                }
+            }
         }
     }
     
@@ -609,6 +692,55 @@ class IconResizerViewModel: ObservableObject {
         resizedImage.addRepresentation(bitmapRep)
         
         return resizedImage
+    }
+    
+    /// Uniform scale to cover `width`×`height`, center-cropped (like CSS `object-cover`). No non-uniform stretch.
+    private func resizeAspectFill(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
+        let srcSize = image.size
+        guard srcSize.width > 0, srcSize.height > 0 else { return nil }
+        
+        let w = width
+        let h = height
+        let scale = max(w / srcSize.width, h / srcSize.height)
+        let drawW = srcSize.width * scale
+        let drawH = srcSize.height * scale
+        let originX = (w - drawW) / 2
+        let originY = (h - drawH) / 2
+        
+        let newSize = NSSize(width: w, height: h)
+        guard let bitmapRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(w),
+            pixelsHigh: Int(h),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return nil
+        }
+        
+        bitmapRep.size = newSize
+        
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
+        
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: w, height: h)).addClip()
+        
+        image.draw(
+            in: NSRect(x: originX, y: originY, width: drawW, height: drawH),
+            from: NSRect(origin: .zero, size: srcSize),
+            operation: .copy,
+            fraction: 1.0
+        )
+        
+        let out = NSImage(size: newSize)
+        out.addRepresentation(bitmapRep)
+        return out
     }
     
     private func resizeScreenshot(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
