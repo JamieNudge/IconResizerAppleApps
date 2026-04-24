@@ -103,6 +103,24 @@ struct CollageCanvasEditorView: View {
         }
     }
     
+    private func collageFitFrameAlignment(_ e: LabImageEntry) -> Alignment {
+        let h: HorizontalAlignment = {
+            switch e.collageFitAlignH {
+            case .leading: return .leading
+            case .center: return .center
+            case .trailing: return .trailing
+            }
+        }()
+        let v: VerticalAlignment = {
+            switch e.collageFitAlignV {
+            case .top: return .top
+            case .center: return .center
+            case .bottom: return .bottom
+            }
+        }()
+        return Alignment(horizontal: h, vertical: v)
+    }
+    
     private var canvasContent: some View {
         GeometryReader { geo in
             let cw = max(1, Double(vm.labCollageCanvasWidth))
@@ -148,7 +166,11 @@ struct CollageCanvasEditorView: View {
                                     .interpolation(.high)
                                     .resizable()
                                     .aspectRatio(contentMode: .fit)
-                                    .frame(width: r.width * sc, height: r.height * sc)
+                                    .frame(
+                                        width: r.width * sc,
+                                        height: r.height * sc,
+                                        alignment: collageFitFrameAlignment(e)
+                                    )
                             }
                         }
                             .background(
@@ -232,6 +254,7 @@ struct CollageCanvasEditorView: View {
                     .gesture(
                         DragGesture(minimumDistance: 2)
                             .onChanged { g in
+                                if p.isFullImageBody { return }
                                 if blogResizeInfo != nil { return }
                                 vm.collageRecordUndoForBlogFrameDragIfNeeded()
                                 let d = CGSize(
@@ -245,23 +268,35 @@ struct CollageCanvasEditorView: View {
                                 )
                             }
                             .onEnded { _ in
+                                if p.isFullImageBody { return }
                                 if blogResizeInfo == nil {
                                     lastBlogMoveCarry = .zero
                                     vm.collageRecordBlogFrameDragEnded()
                                 }
                             }
                     )
-                Text("\(p.targetWidth)×\(p.targetHeight)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundColor(.cyan)
-                    .padding(4)
-                    .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
-                    .offset(x: 4, y: 4)
-                ForEach(BlogFrameCorner.allCases, id: \.self) { corner in
-                    blogResizeControl(handle: .corner(corner), ar: ar, sc: sc)
+                if p.isFullImageBody {
+                    Text("max \(p.targetWidth)w · full artboard")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.cyan)
+                        .padding(4)
+                        .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
+                        .offset(x: 4, y: 4)
+                } else {
+                    Text("\(p.targetWidth)×\(p.targetHeight)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.cyan)
+                        .padding(4)
+                        .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
+                        .offset(x: 4, y: 4)
                 }
-                ForEach(BlogFrameEdge.allCases, id: \.self) { edge in
-                    blogResizeControl(handle: .edge(edge), ar: ar, sc: sc)
+                if !p.isFullImageBody {
+                    ForEach(BlogFrameCorner.allCases, id: \.self) { corner in
+                        blogResizeControl(handle: .corner(corner), ar: ar, sc: sc)
+                    }
+                    ForEach(BlogFrameEdge.allCases, id: \.self) { edge in
+                        blogResizeControl(handle: .edge(edge), ar: ar, sc: sc)
+                    }
                 }
             }
             .frame(width: br.width * sc, height: br.height * sc, alignment: .topLeading)

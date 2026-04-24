@@ -54,9 +54,34 @@ struct ImageCropLabView: View {
     @State private var blogDragTranslation: CGSize = .zero
     @State private var blogRectResizeSession: BlogRectResizeSession?
     
+    private var labSavePngSectionTitle: String {
+        if vm.labCompositingMode == .collage { return "Save composite as PNG…" }
+        if vm.labActiveBlogContentPreset != nil { return "Save as PNG (blog frame)…" }
+        return "Save crop as PNG…"
+    }
+    
+    private var labSavePngHelp: String {
+        if vm.labCompositingMode == .collage {
+            return "Saves the composite. If a blog size is on, uses the cyan blog region; otherwise the full artboard content."
+        }
+        if vm.labActiveBlogContentPreset != nil {
+            return "Saves the cyan blog / article frame at the chosen size (e.g. 1200×630), not the yellow square. Set Blog frame size to Off to save only the square crop."
+        }
+        return "Saves the yellow square region (or the composite in Collage with no blog preset)."
+    }
+    
+    private var labExportPackHelp: String {
+        let base = "Native pixel size plus 128, 256, 512, and 1024 in Desktop/Apple Icons or ImageLabExports when the subfolder option is on."
+        if vm.labCompositingMode == .single, vm.labActiveBlogContentPreset != nil {
+            return "Uses the blog frame output (same as Save as PNG when a blog size is on), then generates resized copies. " + base
+        }
+        return base
+    }
+    
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             leftControlScroll
+                .layoutPriority(0)
             Divider()
             rightWorkArea
                 .layoutPriority(1)
@@ -89,12 +114,12 @@ struct ImageCropLabView: View {
                                 .lineLimit(3)
                                 .textSelection(.enabled)
                         } else {
-                            Text("Default: Desktop/Apple Icons (use top bar for named subfolders)")
+                            Text("Default: Desktop/Apple Icons — same as Web headers / icons when no custom folder is set (see non–Image lab modes).")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Button("Choose existing…") {
                                 vm.chooseLabExportParentExisting()
                             }
@@ -104,6 +129,7 @@ struct ImageCropLabView: View {
                             }
                             .help("Pick a parent, then name the new folder to create for exports")
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         if vm.labExportParentURL != nil {
                             Button("Use default location") {
                                 vm.useDefaultLabExportParent()
@@ -156,15 +182,25 @@ struct ImageCropLabView: View {
                     }
                     
                     labLabeledRow(title: "Export background") {
-                        Toggle("White (else transparent gaps)", isOn: $vm.labCollageExportWhiteBackground)
-                            .help("By default, empty artboard area is transparent in PNG exports. Turn on for an opaque white background (common for blog / social).")
+                        Toggle(isOn: $vm.labCollageExportWhiteBackground) {
+                            Text("White (else transparent gaps)")
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .help("By default, empty artboard area is transparent in PNG exports. Turn on for an opaque white background (common for blog / social).")
                     }
                     
                     if !vm.labImageEntries.isEmpty {
                         labLabeledRow(title: "Layout") {
                             VStack(alignment: .leading, spacing: 6) {
-                                Button("Equal gaps in row (side margins = gaps)") {
+                                Button {
                                     vm.distributeCollageLayersHorizontallyEquidistant()
+                                } label: {
+                                    Text("Equal gaps in row (side margins = gaps)")
+                                        .multilineTextAlignment(.leading)
+                                        .lineLimit(3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .controlSize(.small)
                                 .help("Sorts layers left-to-right by their current x position, then re-spaces so margins and the gaps between boxes are all equal. Layer widths and vertical position stay the same. Fails if total layer width exceeds the artboard; widen the artboard or narrow frames first.")
@@ -178,7 +214,7 @@ struct ImageCropLabView: View {
                                 vm.layoutCollageForStandardBlogContent()
                             }
                             .controlSize(.small)
-                            .help("Sets a 1200×630 artboard, tiles images in a 2-column grid with no gaps between cells, and fits the blog export frame to the full artboard. Add images first, then use Save blog PNG in Blog / article below.")
+                            .help("Sets a 1200×630 artboard, tiles images in a 2-column grid with no gaps, sets each image to align top + center inside its cell (change with Vertical/Horizontal in frame below), and fits the blog export frame to the full artboard. Replaces manual frame positions — use Undo to go back. Then use Save blog PNG in Blog / article.")
                         }
                     }
                 }
@@ -205,47 +241,49 @@ struct ImageCropLabView: View {
                             }
                             .controlSize(.small)
                             if vm.labActiveBlogContentPreset != nil {
-                                HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 6) {
                                     Button("Save blog PNG…") { vm.saveLabBlogImageToFile() }
                                         .help("Saves a PNG at the exact preset size, e.g. 1200×630.")
                                     Button("Apply crop to workspace") { vm.applyLabBlogCropToWorkspace() }
                                         .help("Replaces the lab with a single image at the blog size for further editing.")
                                 }
                                 .controlSize(.small)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                     }
                 }
                 
-                HStack {
-                    Group {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
                         if vm.labCompositingMode == .single {
                             Button("Choose image…") {
                                 vm.chooseLabImageFile(appendAsCollage: false)
                             }
+                            .keyboardShortcut("o", modifiers: [.command])
                         } else {
                             Button("Add image…") {
                                 vm.chooseLabImageFile(appendAsCollage: true)
                             }
+                            .keyboardShortcut("o", modifiers: [.command])
                         }
-                    }
-                    .keyboardShortcut("o", modifiers: [.command])
-                    
-                    if vm.labCompositingMode == .collage, !vm.labImageEntries.isEmpty {
-                        Button("Duplicate selected") {
-                            vm.duplicateSelectedLabImage()
-                        }
-                        if vm.labSelectedEntryId != nil {
-                            Button("Delete", role: .destructive) {
-                                vm.removeSelectedCollageEntry()
+                        if vm.labCompositingMode == .collage, !vm.labImageEntries.isEmpty {
+                            Button("Duplicate selected") {
+                                vm.duplicateSelectedLabImage()
+                            }
+                        } else if vm.labCompositingMode == .single, vm.labSourceImage != nil {
+                            Button("Reset square to center / max") {
+                                vm.resetSelectedLabImageCrop()
                             }
                         }
-                    } else if vm.labSourceImage != nil {
-                        Button("Reset square to center / max") {
-                            vm.resetSelectedLabImageCrop()
+                    }
+                    if vm.labCompositingMode == .collage, !vm.labImageEntries.isEmpty, vm.labSelectedEntryId != nil {
+                        Button("Delete", role: .destructive) {
+                            vm.removeSelectedCollageEntry()
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 
                 if !vm.labImageEntries.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
@@ -284,7 +322,17 @@ struct ImageCropLabView: View {
                 }
                 
                 if vm.labSourceImage != nil, vm.labSelectedEntryId != nil {
-                    if vm.labCompositingMode == .single {
+                    if vm.labCompositingMode == .single, vm.labActiveBlogContentPreset?.isFullImageBody == true {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Article body export")
+                                .font(.caption.bold())
+                            Text("The full screenshot is used (landscape or portrait). No square crop. Set “Blog frame size” to Off if you need the yellow square for app icons again.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if vm.labCompositingMode == .single {
                         let (pw, ph) = vm.labBitmapPixelSize()
                         let minDim = max(1, min(pw, ph))
                         let sideUpper = CGFloat(minDim)
@@ -307,7 +355,7 @@ struct ImageCropLabView: View {
                                         in: sideLower...sideUpper,
                                         step: labPixelSliderStep(lower: sideLower, upper: sideUpper),
                                         onEditingChanged: { editing in
-                                            collageCropSliderEditingChanged(editing)
+                                            labCropSliderEditingChanged(editing)
                                         },
                                         label: { Text("") }
                                     )
@@ -333,7 +381,7 @@ struct ImageCropLabView: View {
                                         in: 0...xUpper,
                                         step: labPixelSliderStep(lower: 0, upper: xUpper),
                                         onEditingChanged: { editing in
-                                            collageCropSliderEditingChanged(editing)
+                                            labCropSliderEditingChanged(editing)
                                         },
                                         label: { Text("") }
                                     )
@@ -359,7 +407,7 @@ struct ImageCropLabView: View {
                                         in: 0...yUpper,
                                         step: labPixelSliderStep(lower: 0, upper: yUpper),
                                         onEditingChanged: { editing in
-                                            collageCropSliderEditingChanged(editing)
+                                            labCropSliderEditingChanged(editing)
                                         },
                                         label: { Text("") }
                                     )
@@ -387,29 +435,74 @@ struct ImageCropLabView: View {
                                     set: { vm.setSelectedCollageLayerFillsFrame($0) }
                                 ))
                                 .help("On: the image covers the layer box; pulling a side in crops (like object-fit: cover). Off: the full image stays visible in the box (letterbox, object-contain).")
+                                if !(vm.labSelectedEntry?.collageFillsFrame ?? false) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Horizontal in frame")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                        Picker("Horizontal in frame", selection: Binding(
+                                            get: { vm.labSelectedEntry?.collageFitAlignH ?? .center },
+                                            set: { h in
+                                                let v = vm.labSelectedEntry?.collageFitAlignV ?? .center
+                                                vm.setSelectedCollageLayerFitAlignment(horizontal: h, vertical: v)
+                                            }
+                                        )) {
+                                            ForEach(CollageLayerFitAlignmentHorizontal.allCases, id: \.self) { a in
+                                                Text(a.rawValue).tag(a)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .controlSize(.small)
+                                        .pickerStyle(.segmented)
+                                        .frame(maxWidth: .infinity)
+                                        Text("Vertical in frame")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                        Picker("Vertical in frame", selection: Binding(
+                                            get: { vm.labSelectedEntry?.collageFitAlignV ?? .center },
+                                            set: { v in
+                                                let h = vm.labSelectedEntry?.collageFitAlignH ?? .center
+                                                vm.setSelectedCollageLayerFitAlignment(horizontal: h, vertical: v)
+                                            }
+                                        )) {
+                                            ForEach(CollageLayerFitAlignmentVertical.allCases, id: \.self) { a in
+                                                Text(a.rawValue).tag(a)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .controlSize(.small)
+                                        .pickerStyle(.segmented)
+                                        .frame(maxWidth: .infinity)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .help("When the image is letterboxed (smaller than the layer box), choose where it sits — e.g. **Top** to line up with a taller image beside it. Export matches.")
+                                }
                             }
                             Text("Resize the layer on the canvas; turn on Fill frame when you want to narrow the box without shrinking the whole photo. Use Single mode for the square crop pipeline.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
+                                .multilineTextAlignment(.leading)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 12) {
-                            Text(vm.labCompositingMode == .collage ? "Save composite as PNG…" : "Save crop as PNG…")
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(labSavePngSectionTitle)
+                                .font(.subheadline)
                             Button("Save as PNG…") {
                                 vm.saveLabCropToFile()
                             }
                             .keyboardShortcut("s", modifiers: [.command])
+                            .help(labSavePngHelp)
                         }
-                        HStack(spacing: 12) {
-                            Button("Export + sizes") {
-                                vm.exportLabCropWithResizedPresets()
-                            }
-                            .help("Saves native (single) or composite (collage) size plus 128, 256, 512, and 1024 px to Desktop/Apple Icons or ImageLabExports if subfolder is on.")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Export + sizes") {
+                            vm.exportLabCropWithResizedPresets()
                         }
+                        .help(labExportPackHelp)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 
                 if !vm.labImageEntries.isEmpty {
@@ -420,9 +513,13 @@ struct ImageCropLabView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
+            // Bounded width so Text and controls wrap instead of growing into the canvas (ScrollView can propose infinite width to children without this).
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(minWidth: 300, idealWidth: 340, maxWidth: 400, alignment: .leading)
+        // Wider than before: canvas can shrink; keeps controls and button labels from truncating.
+        .frame(minWidth: 400, idealWidth: 500, maxWidth: 560, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
+        .clipped()
     }
     
     private var rightWorkArea: some View {
@@ -439,37 +536,64 @@ struct ImageCropLabView: View {
     }
     
     private var singleModeEditorPanel: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isDropTargeted ? Color.blue : Color.gray.opacity(0.5), lineWidth: 2)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .textBackgroundColor)))
-            if let img = vm.labSourceImage {
-                previewWithOverlay(image: img)
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "square.dashed")
-                        .font(.largeTitle)
-                        .foregroundColor(.secondary)
-                    Text("Drop an image file here or use Choose image…")
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
-                        .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
+                Button {
+                    vm.singleUndo()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .help("Undo (⌘Z)")
+                .disabled(!vm.singleCanUndo)
+                .keyboardShortcut("z", modifiers: .command)
+                Button {
+                    vm.singleRedo()
+                } label: {
+                    Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                .help("Redo (⌘⇧Z)")
+                .disabled(!vm.singleCanRedo)
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                Spacer(minLength: 8)
+            }
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(isDropTargeted ? Color.blue : Color.gray.opacity(0.5), lineWidth: 2)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .textBackgroundColor)))
+                if let img = vm.labSourceImage {
+                    previewWithOverlay(image: img)
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "square.dashed")
+                            .font(.largeTitle)
+                            .foregroundColor(.secondary)
+                        Text("Drop an image file here or use Choose image…")
+                            .font(.subheadline)
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 12))
-        .onDrop(of: Self.labImageDropTypes, isTargeted: $isDropTargeted) { providers in
-            vm.handleDrop(providers: providers)
-            return true
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(alignment: .bottom) {
-            if vm.labSourceImage != nil {
-                Text("Drag inside the square to move · drag orange corners to resize")
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .onDrop(of: Self.labImageDropTypes, isTargeted: $isDropTargeted) { providers in
+                vm.handleDrop(providers: providers)
+                return true
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottom) {
+                if vm.labSourceImage != nil {
+                    Group {
+                        if vm.labActiveBlogContentPreset?.isFullImageBody == true {
+                            Text("Article body: use Save blog PNG in the sidebar (no square crop)")
+                        } else {
+                            Text("Drag inside the square to move · drag orange corners to resize")
+                        }
+                    }
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .padding(.bottom, 6)
                     .allowsHitTesting(false)
+                }
             }
         }
     }
@@ -482,6 +606,8 @@ struct ImageCropLabView: View {
             Text("Uses your current lab result (single crop or composite). Store and device match the other modes in this app (App Icons, Web headers, Screenshots).")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
             
             labLabeledRow(title: "Store (icons + screenshots)") {
@@ -588,6 +714,7 @@ struct ImageCropLabView: View {
                         Text(vm.labConsoleLines[i])
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -604,10 +731,13 @@ struct ImageCropLabView: View {
         Binding(get: get, set: set)
     }
     
-    private func collageCropSliderEditingChanged(_ editing: Bool) {
+    private func labCropSliderEditingChanged(_ editing: Bool) {
         if vm.labCompositingMode == .collage {
             if editing { vm.pushCollageCropSessionStartIfNeeded() }
             else { vm.pushCollageCropSessionEnded() }
+        } else if vm.labCompositingMode == .single {
+            if editing { vm.pushSingleCropSessionStartIfNeeded() }
+            else { vm.pushSingleCropSessionEnded() }
         }
     }
     
@@ -616,6 +746,8 @@ struct ImageCropLabView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.subheadline.weight(.medium))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -677,6 +809,7 @@ struct ImageCropLabView: View {
                             DragGesture(minimumDistance: 2)
                                 .onChanged { value in
                                     guard resizeSession == nil, blogRectResizeSession == nil else { return }
+                                    vm.singleRecordSquareCropGestureIfNeeded()
                                     dragTranslation = value.translation
                                 }
                                 .onEnded { value in
@@ -686,6 +819,7 @@ struct ImageCropLabView: View {
                                         dy: value.translation.height / fit
                                     )
                                     dragTranslation = .zero
+                                    vm.singleRecordSquareCropGestureEnded()
                                 }
                         )
                     
@@ -694,6 +828,9 @@ struct ImageCropLabView: View {
                     }
                 }
                 .frame(width: max(1, box), height: max(1, box))
+                // Article-body preset uses the full image: hide the **square** crop (blog export handles the shot).
+                .opacity(vm.labActiveBlogContentPreset?.isFullImageBody == true ? 0 : 1)
+                .allowsHitTesting(vm.labActiveBlogContentPreset?.isFullImageBody != true)
                 .offset(x: padX + ox * fit, y: padY + oy * fit)
                 .zIndex(10)
             }
@@ -727,26 +864,41 @@ struct ImageCropLabView: View {
                     .gesture(
                         DragGesture(minimumDistance: 1)
                             .onChanged { g in
+                                if p.isFullImageBody { return }
                                 guard resizeSession == nil, blogRectResizeSession == nil else { return }
+                                vm.singleRecordBlogFrameGestureIfNeeded()
                                 blogDragTranslation = g.translation
                             }
                             .onEnded { g in
+                                if p.isFullImageBody { return }
                                 guard resizeSession == nil, blogRectResizeSession == nil else { return }
                                 vm.translateSelectedEntryBlogContentRect(
                                     dx: g.translation.width / fit,
                                     dy: g.translation.height / fit
                                 )
                                 blogDragTranslation = .zero
+                                vm.singleRecordBlogFrameGestureEnded()
                             }
                     )
-                Text("\(p.targetWidth)×\(p.targetHeight)")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundColor(.cyan)
-                    .padding(4)
-                    .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
-                    .offset(x: 4, y: 4)
-                ForEach(LabResizeCorner.allCases, id: \.self) { corner in
-                    blogRectResizeKnob(corner: corner, br: display, ar: ar, fit: fit, bw: bw, bh: bh)
+                if p.isFullImageBody {
+                    Text("max \(p.targetWidth)w · full image")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.cyan)
+                        .padding(4)
+                        .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
+                        .offset(x: 4, y: 4)
+                } else {
+                    Text("\(p.targetWidth)×\(p.targetHeight)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.cyan)
+                        .padding(4)
+                        .background(Capsule().fill(Color(nsColor: .textBackgroundColor).opacity(0.9)))
+                        .offset(x: 4, y: 4)
+                }
+                if !p.isFullImageBody {
+                    ForEach(LabResizeCorner.allCases, id: \.self) { corner in
+                        blogRectResizeKnob(corner: corner, br: display, ar: ar, fit: fit, bw: bw, bh: bh)
+                    }
                 }
             }
             .frame(width: max(1, bw), height: max(1, bh), alignment: .topLeading)
@@ -784,6 +936,7 @@ struct ImageCropLabView: View {
                         if blogRectResizeSession == nil, resizeSession == nil {
                             blogDragTranslation = .zero
                             if let b0 = vm.labSelectedEntry?.blogContentRect {
+                                vm.singleRecordBlogFrameGestureIfNeeded()
                                 blogRectResizeSession = BlogRectResizeSession(
                                     corner: corner,
                                     start: b0,
@@ -798,6 +951,7 @@ struct ImageCropLabView: View {
                         if blogRectResizeSession?.corner == corner {
                             blogRectResizeSession = nil
                             vm.clampSelectedEntryBlogContentRect()
+                            vm.singleRecordBlogFrameGestureEnded()
                         }
                     }
             )
@@ -855,6 +1009,7 @@ struct ImageCropLabView: View {
                         if resizeSession == nil {
                             dragTranslation = .zero
                             if let s = vm.labSelectedEntry {
+                                vm.singleRecordSquareCropGestureIfNeeded()
                                 resizeSession = LabResizeSession(
                                     corner: corner,
                                     startOx: s.cropOriginX,
@@ -870,6 +1025,7 @@ struct ImageCropLabView: View {
                         if resizeSession?.corner == corner {
                             resizeSession = nil
                             vm.clampSelectedLabEntryCrop()
+                            vm.singleRecordSquareCropGestureEnded()
                         }
                     }
             )

@@ -14,6 +14,7 @@ struct ContentView: View {
     
     private static let imageLabHelpText = """
 Single: yellow square = crop; drag inside or use orange handles. \
+For blog body shots (e.g. full app window, landscape), choose “Blog / article” → “Article body — full image, max width … (native aspect)” and Save blog PNG (no square). \
 Collage: drag layers; orange corners resize. Sliders set square crop for the selected image. \
 “Also run on this image” uses the same engines as App Icons, Web headers, and Screenshots (choose Store and device). \
 Save / Export + sizes for PNG packs. Subfolder toggle in the top bar controls BlogHeaders, ImageLabExports, store screenshot folders, etc. \
@@ -249,6 +250,40 @@ Logs: left sidebar console.
             }
             .toggleStyle(.switch)
             .padding(.horizontal, 40)
+            
+            // Sandboxed builds often cannot write to the default "Desktop" mirror; user-granted folder fixes that.
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Export destination")
+                    .font(.subheadline.weight(.semibold))
+                if let custom = resizer.labExportParentURL {
+                    Text(custom.path)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(4)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: 520, alignment: .leading)
+                } else {
+                    Text("Default: a folder called “Apple Icons” on your Desktop. If saving fails with a permission error, use Choose folder and pick (or create) a folder so macOS can grant write access.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: 520, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 10) {
+                    Button("Choose folder…") {
+                        resizer.chooseLabExportParentExisting()
+                    }
+                    if resizer.labExportParentURL != nil {
+                        Button("Use default location") {
+                            resizer.useDefaultLabExportParent()
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 560)
+            .padding(.horizontal, 40)
+            .padding(.top, 4)
             
             // Drop zone
             ZStack {
