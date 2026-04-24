@@ -14,7 +14,9 @@ struct IconResizerApp: App {
             ContentView()
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        // `.contentSize` blocks user resize and full screen; use auto + default size for Image lab.
+        .defaultSize(width: 1200, height: 800)
+        .windowResizability(.automatic)
     }
 }
 

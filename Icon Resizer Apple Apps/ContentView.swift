@@ -12,7 +12,149 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var resizer = IconResizerViewModel()
     
+    private static let imageLabHelpText = """
+Single: yellow square = crop; drag inside or use orange handles. \
+Collage: drag layers; orange corners resize. Sliders set square crop for the selected image. \
+“Also run on this image” uses the same engines as App Icons, Web headers, and Screenshots (choose Store and device). \
+Save / Export + sizes for PNG packs. Subfolder toggle in the top bar controls BlogHeaders, ImageLabExports, store screenshot folders, etc. \
+“Folder for lab exports”: choose an existing folder, or create a new one (parent + name), or use the default. \
+Logs: left sidebar console.
+"""
+    
     var body: some View {
+        Group {
+            if resizer.operationMode == .imageLab {
+                imageLabRoot
+            } else {
+                standardModeRoot
+            }
+        }
+        .frame(
+            minWidth: resizer.operationMode == .imageLab ? 880 : 520,
+            minHeight: resizer.operationMode == .imageLab ? 520 : nil
+        )
+        .frame(
+            width: resizer.operationMode == .imageLab ? nil : 520,
+            height: resizer.operationMode == .imageLab ? nil : 980
+        )
+        .frame(
+            maxWidth: resizer.operationMode == .imageLab ? .infinity : nil,
+            maxHeight: resizer.operationMode == .imageLab ? .infinity : nil
+        )
+    }
+    
+    /// Fills the window: thin chrome + full-height editor. Help lives in the toolbar menu.
+    private var imageLabRoot: some View {
+        VStack(spacing: 0) {
+            imageLabTopBar
+            
+            if !resizer.statusMessage.isEmpty {
+                Text(resizer.statusMessage)
+                    .font(.subheadline)
+                    .foregroundColor(
+                        resizer.isProcessing
+                        ? .orange
+                        : (resizer.statusMessage.contains("✅") ? .green : .red)
+                    )
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
+            }
+            
+            if resizer.isProcessing {
+                ProgressView()
+                    .scaleEffect(0.85)
+                    .padding(.vertical, 4)
+            }
+            
+            ImageCropLabView(vm: resizer)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            
+            if resizer.lastOutputFolder != nil {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button {
+                        if let folder = resizer.lastOutputFolder {
+                            NSWorkspace.shared.activateFileViewerSelecting([folder])
+                        }
+                    } label: {
+                        Label("Open output folder", systemImage: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(10)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Text(Self.imageLabHelpText)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } label: {
+                    Label("Image lab tips", systemImage: "questionmark.circle")
+                }
+            }
+        }
+    }
+    
+    private var imageLabTopBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 12) {
+                Group {
+                    if let appIcon = NSImage(named: NSImage.applicationIconName) {
+                        Image(nsImage: appIcon)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 32, height: 32)
+                    } else {
+                        Image(systemName: "square.dashed.inset.filled")
+                            .font(.title2)
+                            .foregroundColor(.blue)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Image lab")
+                        .font(.title2.weight(.semibold))
+                    Text(headerSubtitle(for: .imageLab))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                .layoutPriority(1)
+                
+                Spacer(minLength: 8)
+                
+                Picker("", selection: $resizer.operationMode) {
+                    ForEach(OperationMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 440)
+            }
+            Toggle(isOn: $resizer.createExportSubfolder) {
+                Text("Create a named subfolder in the destination")
+            }
+            .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Rectangle()
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+    }
+    
+    @ViewBuilder
+    private var standardModeRoot: some View {
         VStack(spacing: 20) {
             // Header
             VStack(spacing: 8) {
@@ -108,35 +250,31 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .padding(.horizontal, 40)
             
-            if resizer.operationMode == .imageLab {
-                ImageCropLabView(vm: resizer)
-            } else {
-                // Drop zone
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(style: StrokeStyle(lineWidth: 3, dash: [10]))
+            // Drop zone
+            ZStack {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(style: StrokeStyle(lineWidth: 3, dash: [10]))
+                    .foregroundColor(resizer.isTargeted ? .blue : .gray)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(resizer.isTargeted ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
+                    )
+                
+                VStack(spacing: 16) {
+                    Image(systemName: resizer.isTargeted ? "arrow.down.circle.fill" : "arrow.down.circle")
+                        .font(.system(size: 50))
                         .foregroundColor(resizer.isTargeted ? .blue : .gray)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(resizer.isTargeted ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
-                        )
                     
-                    VStack(spacing: 16) {
-                        Image(systemName: resizer.isTargeted ? "arrow.down.circle.fill" : "arrow.down.circle")
-                            .font(.system(size: 50))
-                            .foregroundColor(resizer.isTargeted ? .blue : .gray)
-                        
-                        Text(resizer.isTargeted ? "Drop PNG here" : "Drag PNG here")
-                            .font(.title3)
-                            .foregroundColor(resizer.isTargeted ? .blue : .secondary)
-                    }
+                    Text(resizer.isTargeted ? "Drop PNG here" : "Drag PNG here")
+                        .font(.title3)
+                        .foregroundColor(resizer.isTargeted ? .blue : .secondary)
                 }
-                .frame(height: 200)
-                .padding(.horizontal, 40)
-                .onDrop(of: [.png, .image], isTargeted: $resizer.isTargeted) { providers in
-                    resizer.handleDrop(providers: providers)
-                    return true
-                }
+            }
+            .frame(height: 200)
+            .padding(.horizontal, 40)
+            .onDrop(of: [.png, .image], isTargeted: $resizer.isTargeted) { providers in
+                resizer.handleDrop(providers: providers)
+                return true
             }
             
             // Status
@@ -174,17 +312,7 @@ struct ContentView: View {
             
             // Info
             VStack(alignment: .leading, spacing: 4) {
-                if resizer.operationMode == .imageLab {
-                    Text("Image lab")
-                        .font(.caption.bold())
-                    Text("• Yellow square = crop region in bitmap pixels")
-                    Text("• Drag inside the square to move; drag orange corner handles to scale")
-                    Text("• Sliders still adjust size and X/Y precisely")
-                    Text("• Export crop + sizes writes native square plus 128 / 256 / 512 / 1024 px PNGs (same folder rules as above)")
-                    Text("• Save crop as PNG, or run the same App Icons export using your crop (scaled to 1024×1024 when possible)")
-                    Text("• Log output appears in the lab console at the bottom of that section")
-                        .foregroundColor(.green)
-                } else if resizer.operationMode == .blogHeaders {
+                if resizer.operationMode == .blogHeaders {
                     Text("Generates (aspect-fill, no stretch):")
                         .font(.caption.bold())
                     Text("• 1200 × 630px — OG / share card")
@@ -274,7 +402,7 @@ struct ContentView: View {
             .padding(.horizontal, 40)
             .padding(.bottom, 20)
         }
-        .frame(width: 520, height: 920)
+        .frame(width: 520, height: 980)
     }
     
     /// Segmented `Picker` titles are laid out beside the control; in a narrow window the label can wrap one letter per line. Keep the title as its own row.
@@ -318,12 +446,8 @@ struct ContentView: View {
         case .blogHeaders:
             return "Drop one PNG — images are scaled and center-cropped to each preset (like object-cover)"
         case .imageLab:
-            return "Square crop in pixels, preview, then save or feed into App Icons export"
+            return "Crop or collage, then save PNGs, app icons, web headers, or store screenshots"
         }
     }
-}
-
-#Preview {
-    ContentView()
 }
 

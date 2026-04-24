@@ -42,6 +42,53 @@ enum AndroidScreenshotDevice: String, CaseIterable {
     case tablet = "Tablet"
 }
 
+// MARK: - Image lab: single image or multi-image collage
+
+struct LabImageEntry: Identifiable, Equatable {
+    var id: UUID
+    var image: NSImage
+    var cropSize: CGFloat
+    var cropOriginX: CGFloat
+    var cropOriginY: CGFloat
+    /// Collage only: where this layer is drawn, in **canvas coordinates** (origin top-left). Single mode ignores this.
+    var canvasFrame: CGRect
+    /// Collage: if `true`, the image **fills** the frame (crops; like CSS `object-cover`). If `false` (default), the **entire** image is visible (letterboxed; `object-contain`).
+    var collageFillsFrame: Bool
+    /// Single mode: optional blog / article crop in **image pixel** space (origin top-left, y increases downward), same convention as the square crop sliders. `nil` = not set.
+    var blogContentRect: CGRect?
+    
+    static func == (lhs: LabImageEntry, rhs: LabImageEntry) -> Bool { lhs.id == rhs.id }
+}
+
+// MARK: - Image lab: blog / article (OG & header) presets
+
+struct LabBlogContentPreset: Identifiable, Hashable, Equatable {
+    var id: String
+    var label: String
+    var targetWidth: Int
+    var targetHeight: Int
+    var aspect: CGFloat { CGFloat(targetWidth) / CGFloat(max(1, targetHeight)) }
+    
+    /// 1200×630 — standard OG / share card; primary quick action in Image Lab.
+    static let standardOG = LabBlogContentPreset(
+        id: "1200x630",
+        label: "1200×630 (OG / blog hero)",
+        targetWidth: 1200,
+        targetHeight: 630
+    )
+    
+    static let all: [LabBlogContentPreset] = [
+        .standardOG,
+        LabBlogContentPreset(id: "1600x900", label: "1600×900 (16:9)", targetWidth: 1600, targetHeight: 900),
+        LabBlogContentPreset(id: "1024x576", label: "1024×576 (16:9)", targetWidth: 1024, targetHeight: 576)
+    ]
+}
+
+enum LabCompositingMode: String, CaseIterable {
+    case single = "Single"
+    case collage = "Collage"
+}
+
 class IconResizerViewModel: ObservableObject {
     @Published var isTargeted = false
     @Published var isProcessing = false
@@ -54,18 +101,362 @@ class IconResizerViewModel: ObservableObject {
     @Published var androidScreenshotDevice: AndroidScreenshotDevice = .phone
     /// When true, exports go into `base/<subfolder>` (e.g. BlogHeaders, AndroidIcons). When false, files are written directly into `base` (no extra nesting from the picker).
     @Published var createExportSubfolder: Bool = false
+    /// When set, Image lab–originated batch exports (Export + sizes, and “Also run on this image”) use this as the base folder instead of `Desktop/Apple Icons`.
+    @Published var labExportParentURL: URL? = nil
     
-    // MARK: - Image lab (square crop in image pixels)
-    @Published var labSourceImage: NSImage?
-    /// Square crop side length in **bitmap pixels**.
-    @Published var labCropSize: CGFloat = 256
-    /// Top-left of the crop square in **bitmap pixels** (origin at top-left of image).
-    @Published var labCropOriginX: CGFloat = 0
-    @Published var labCropOriginY: CGFloat = 0
+    // MARK: - Image lab (square crop in image pixels) + multi-image collage
+    /// All loaded images; the selected one is edited with the crop tools.
+    @Published var labImageEntries: [LabImageEntry] = []
+    @Published var labSelectedEntryId: UUID?
+    @Published var labCompositingMode: LabCompositingMode = .single
+    /// Logical size of the collage artboard (layers are placed in this coordinate system).
+    @Published var labCollageCanvasWidth: CGFloat = 800
+    @Published var labCollageCanvasHeight: CGFloat = 500
+    /// Longest edge in pixels of exported composite (and scale used when rendering the PNG).
+    @Published var labCollageOutputSize: CGFloat = 1024
+    /// When true, composite / blog exports use an opaque **white** artboard behind layers. When false (default), empty areas are **transparent** in the PNG.
+    @Published var labCollageExportWhiteBackground: Bool = false
+    /// When set, Image Lab shows a blog/OG frame (collage: on artboard; single: on full image) and enables blog export.
+    @Published var labActiveBlogContentPreset: LabBlogContentPreset? = nil
+    /// Collage: export region in artboard coordinates (top-left), aspect matches `labActiveBlogContentPreset`.
+    @Published var labBlogContentFrame: CGRect = .zero
     @Published var labConsoleLines: [String] = []
     /// Retained while "Choose image…" is showing so we can dismiss it when the user drops a file into the lab instead.
     private var labChooseImageOpenPanel: NSOpenPanel?
     private let ciContext = CIContext(options: nil)
+    
+    // MARK: - Image lab: collage undo / redo
+    private struct LabCollageState {
+        var entries: [LabImageEntry]
+        var canvasW: CGFloat
+        var canvasH: CGFloat
+        var selectedId: UUID?
+        var blogPreset: LabBlogContentPreset?
+        var blogContentFrame: CGRect
+    }
+    private var labCollageUndoStack: [LabCollageState] = []
+    private var labCollageRedoStack: [LabCollageState] = []
+    private var collageLayerGestureUndoRecorded = false
+    private var blogFrameGestureUndoRecorded = false
+    private var collageCropSliderPushed = false
+    private static let maxCollageUndo = 50
+    
+    @Published private(set) var collageCanUndo = false
+    @Published private(set) var collageCanRedo = false
+    
+    var labSelectedEntry: LabImageEntry? {
+        guard let id = labSelectedEntryId else { return nil }
+        return labImageEntries.first { $0.id == id }
+    }
+    
+    /// Backward compat for views that need the current image for preview.
+    var labSourceImage: NSImage? { labSelectedEntry?.image }
+    
+    private func takeCollageSnapshot() -> LabCollageState {
+        LabCollageState(
+            entries: labImageEntries.map { $0 },
+            canvasW: labCollageCanvasWidth,
+            canvasH: labCollageCanvasHeight,
+            selectedId: labSelectedEntryId,
+            blogPreset: labActiveBlogContentPreset,
+            blogContentFrame: labBlogContentFrame
+        )
+    }
+    
+    private func applyCollageSnapshot(_ s: LabCollageState) {
+        labImageEntries = s.entries
+        labCollageCanvasWidth = s.canvasW
+        labCollageCanvasHeight = s.canvasH
+        labSelectedEntryId = s.selectedId
+        labActiveBlogContentPreset = s.blogPreset
+        labBlogContentFrame = s.blogContentFrame
+        if let sid = labSelectedEntryId, !labImageEntries.contains(where: { $0.id == sid }) {
+            labSelectedEntryId = labImageEntries.first?.id
+        }
+    }
+    
+    private func updateCollageUndoPublished() {
+        collageCanUndo = !labCollageUndoStack.isEmpty
+        collageCanRedo = !labCollageRedoStack.isEmpty
+    }
+    
+    private func clearCollageUndoHistory() {
+        labCollageUndoStack.removeAll()
+        labCollageRedoStack.removeAll()
+        collageLayerGestureUndoRecorded = false
+        blogFrameGestureUndoRecorded = false
+        collageCropSliderPushed = false
+        updateCollageUndoPublished()
+    }
+    
+    private func pushCollageUndoBeforeMutation() {
+        guard labCompositingMode == .collage else { return }
+        let snap = takeCollageSnapshot()
+        labCollageUndoStack.append(snap)
+        if labCollageUndoStack.count > Self.maxCollageUndo {
+            labCollageUndoStack.removeFirst(labCollageUndoStack.count - Self.maxCollageUndo)
+        }
+        labCollageRedoStack.removeAll()
+        updateCollageUndoPublished()
+    }
+    
+    /// Call once at the start of a layer move/resize gesture (collage canvas).
+    func collageRecordUndoForLayerDragIfNeeded() {
+        guard labCompositingMode == .collage, !collageLayerGestureUndoRecorded else { return }
+        pushCollageUndoBeforeMutation()
+        collageLayerGestureUndoRecorded = true
+    }
+    
+    func collageRecordLayerDragEnded() {
+        collageLayerGestureUndoRecorded = false
+    }
+    
+    func collageRecordUndoForBlogFrameDragIfNeeded() {
+        guard labCompositingMode == .collage, !blogFrameGestureUndoRecorded else { return }
+        pushCollageUndoBeforeMutation()
+        blogFrameGestureUndoRecorded = true
+    }
+    
+    func collageRecordBlogFrameDragEnded() {
+        blogFrameGestureUndoRecorded = false
+    }
+    
+    /// Square-crop sliders: one undo step per drag session.
+    func pushCollageCropSessionStartIfNeeded() {
+        guard labCompositingMode == .collage, !collageCropSliderPushed else { return }
+        pushCollageUndoBeforeMutation()
+        collageCropSliderPushed = true
+    }
+    
+    func pushCollageCropSessionEnded() {
+        collageCropSliderPushed = false
+    }
+    
+    func collageUndo() {
+        guard labCompositingMode == .collage, let previous = labCollageUndoStack.popLast() else { return }
+        let current = takeCollageSnapshot()
+        labCollageRedoStack.append(current)
+        applyCollageSnapshot(previous)
+        updateCollageUndoPublished()
+        labLog("Collage: Undo")
+    }
+    
+    func collageRedo() {
+        guard labCompositingMode == .collage, let next = labCollageRedoStack.popLast() else { return }
+        let current = takeCollageSnapshot()
+        labCollageUndoStack.append(current)
+        applyCollageSnapshot(next)
+        updateCollageUndoPublished()
+        labLog("Collage: Redo")
+    }
+    
+    func setCollageCanvasWidth(_ new: CGFloat) {
+        let clamped = min(2400, max(200, new))
+        guard clamped != labCollageCanvasWidth else { return }
+        if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        labCollageCanvasWidth = clamped
+        userChangedCollageCanvasSize()
+    }
+    
+    func setCollageCanvasHeight(_ new: CGFloat) {
+        let clamped = min(2000, max(200, new))
+        guard clamped != labCollageCanvasHeight else { return }
+        if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        labCollageCanvasHeight = clamped
+        userChangedCollageCanvasSize()
+    }
+    
+    /// Removes the selected collage layer (same as the sidebar Remove). Caller should use when `labCompositingMode == .collage`.
+    func removeSelectedCollageEntry() {
+        guard labCompositingMode == .collage, let id = labSelectedEntryId else { return }
+        removeLabImage(id: id)
+    }
+    
+    private func labPixelSize(of image: NSImage) -> (Int, Int) {
+        if let bmp = largestBitmapRep(in: image) {
+            return (bmp.pixelsWide, bmp.pixelsHigh)
+        }
+        return (max(1, Int(image.size.width)), max(1, Int(image.size.height)))
+    }
+    
+    private func makeLabEntry(from image: NSImage, canvasFrame: CGRect) -> LabImageEntry {
+        let img = canonicalSingleLayerImage(image) ?? image
+        let (w, h) = labPixelSize(of: img)
+        let side = CGFloat(max(1, min(w, h)))
+        return LabImageEntry(
+            id: UUID(),
+            image: img,
+            cropSize: side,
+            cropOriginX: (CGFloat(w) - side) / 2,
+            cropOriginY: (CGFloat(h) - side) / 2,
+            canvasFrame: canvasFrame,
+            collageFillsFrame: false,
+            blogContentRect: nil
+        )
+    }
+    
+    /// Suggested non-overlapping position for the next layer (index = count before append).
+    private func nextDefaultCollageFrame(countBefore: Int) -> CGRect {
+        let W = labCollageCanvasWidth
+        let H = labCollageCanvasHeight
+        let f: CGRect
+        switch countBefore {
+        case 0: f = CGRect(x: 0, y: 0, width: W * 0.5, height: H)
+        case 1: f = CGRect(x: W * 0.5, y: 0, width: W * 0.5, height: H)
+        default:
+            let i = countBefore
+            let col = CGFloat(i % 2)
+            let row = CGFloat(i / 2)
+            f = CGRect(x: col * (W / 2), y: row * (H / 2), width: W / 2, height: H / 2)
+        }
+        return clampCanvasFrame(f)
+    }
+    
+    /// Clamps a layer frame to the current canvas and minimum size.
+    func clampCanvasFrame(_ r: CGRect) -> CGRect {
+        let W = max(1, labCollageCanvasWidth)
+        let H = max(1, labCollageCanvasHeight)
+        let m: CGFloat = 16
+        var f = r
+        f.size.width = min(max(f.size.width, m), W)
+        f.size.height = min(max(f.size.height, m), H)
+        f.origin.x = min(max(0, f.origin.x), W - f.size.width)
+        f.origin.y = min(max(0, f.origin.y), H - f.size.height)
+        if f.size.width < m { f.size.width = m; f.origin.x = min(f.origin.x, W - m) }
+        if f.size.height < m { f.size.height = m; f.origin.y = min(f.origin.y, H - m) }
+        return f
+    }
+    
+    func clampAllCollageCanvasFrames() {
+        for i in labImageEntries.indices {
+            labImageEntries[i].canvasFrame = clampCanvasFrame(labImageEntries[i].canvasFrame)
+        }
+    }
+    
+    /// Collage: update layer position/size on the artboard. Coordinates = canvas space, top-left origin.
+    func updateEntryCanvasFrame(id: UUID, frame: CGRect) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == id }) else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            labImageEntries[i].canvasFrame = clampCanvasFrame(frame)
+        }
+    }
+    
+    func translateEntryCanvasFrame(id: UUID, dx: CGFloat, dy: CGFloat) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == id }) else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            var f = labImageEntries[i].canvasFrame
+            f.origin.x += dx
+            f.origin.y += dy
+            labImageEntries[i].canvasFrame = clampCanvasFrame(f)
+        }
+    }
+    
+    /// Collage: per-layer `object-fit` — full image visible vs crop to frame.
+    func setSelectedCollageLayerFillsFrame(_ fills: Bool) {
+        guard labCompositingMode == .collage, let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        guard labImageEntries[i].collageFillsFrame != fills else { return }
+        pushCollageUndoBeforeMutation()
+        labImageEntries[i].collageFillsFrame = fills
+    }
+    
+    private func setSingleLabImage(_ image: NSImage) {
+        let full = CGRect(
+            x: 0, y: 0,
+            width: labCollageCanvasWidth,
+            height: labCollageCanvasHeight
+        )
+        var e = makeLabEntry(from: image, canvasFrame: full)
+        clampLabCrop(&e)
+        labImageEntries = [e]
+        labSelectedEntryId = e.id
+        let (w, h) = labPixelSize(of: e.image)
+        labLog("Single: loaded \(w)×\(h) px — square crop \(Int(e.cropSize)) px centered")
+    }
+    
+    private func appendLabImage(_ image: NSImage, recordUndo: Bool = true) {
+        if recordUndo, labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        let cf = nextDefaultCollageFrame(countBefore: labImageEntries.count)
+        var e = makeLabEntry(from: image, canvasFrame: cf)
+        clampLabCrop(&e)
+        labImageEntries.append(e)
+        labSelectedEntryId = e.id
+        let (w, h) = labPixelSize(of: e.image)
+        labLog("Collage: added image \(w)×\(h) px (total \(labImageEntries.count)) @ canvas \(Int(cf.width))×\(Int(cf.height))")
+    }
+    
+    func removeLabImage(id: UUID) {
+        if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        labImageEntries.removeAll { $0.id == id }
+        if labSelectedEntryId == id {
+            labSelectedEntryId = labImageEntries.first?.id
+        }
+        if labCompositingMode == .single, labImageEntries.count > 1, let first = labImageEntries.first {
+            labImageEntries = [first]
+            labSelectedEntryId = first.id
+        }
+    }
+    
+    /// Copy image + independent crop; offset on canvas.
+    func duplicateSelectedLabImage() {
+        if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        guard let e0 = labSelectedEntry else { return }
+        var e = e0
+        e.id = UUID()
+        e.canvasFrame = clampCanvasFrame(e0.canvasFrame.offsetBy(dx: 32, dy: 32))
+        labImageEntries.append(e)
+        labSelectedEntryId = e.id
+        labLog("Duplicated image as new entry")
+    }
+    
+    func selectLabImage(id: UUID) {
+        labSelectedEntryId = id
+    }
+    
+    private func applyCompositingModeIfNeeded() {
+        if labCompositingMode == .single, labImageEntries.count > 1 {
+            if let first = labImageEntries.first {
+                labImageEntries = [first]
+                labSelectedEntryId = first.id
+            }
+        }
+    }
+    
+    private func loadAllLabImagesFromProviders(_ providers: [NSItemProvider], done: @escaping (Int) -> Void) {
+        let n = providers.count
+        guard n > 0 else {
+            done(0)
+            return
+        }
+        var slot: [NSImage?] = Array(repeating: nil, count: n)
+        let group = DispatchGroup()
+        for (i, provider) in providers.enumerated() {
+            group.enter()
+            loadImageFromItemProvider(provider) { img in
+                slot[i] = img
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            let images = slot.compactMap { $0 }
+            guard !images.isEmpty else {
+                done(0)
+                return
+            }
+            if self.labCompositingMode == .collage {
+                self.pushCollageUndoBeforeMutation()
+            }
+            var added = 0
+            for img in images {
+                self.appendLabImage(img, recordUndo: false)
+                added += 1
+            }
+            done(added)
+        }
+    }
     
     /// `~/Desktop/Apple Icons` for the current user (must match a non-sandboxed build, or exports need the folder picker).
     private var defaultExportBaseFolder: URL {
@@ -82,9 +473,97 @@ class IconResizerViewModel: ObservableObject {
         return base
     }
     
+    /// Base directory for Image lab pack exports and lab-triggered blog/icons/screenshot runs (`nil` → `defaultExportBaseFolder`).
+    private var effectiveLabExportBase: URL {
+        labExportParentURL ?? defaultExportBaseFolder
+    }
+    
+    /// Pick an **existing** folder. Use New Folder in the lower-left to create and enter one, then select Open.
+    func chooseLabExportParentExisting() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose export folder"
+        panel.message = "Select an **existing** folder, or use **New Folder** to create a new one, open it, then click Open."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = labExportParentURL ?? defaultExportBaseFolder
+        panel.begin { response in
+            guard response == .OK, let u = panel.url else {
+                return
+            }
+            DispatchQueue.main.async {
+                self.labExportParentURL = u
+                self.labLog("Custom export base: \(u.path)")
+                self.statusMessage = "✅ Exports from Image lab will use: \(u.lastPathComponent)"
+            }
+        }
+    }
+    
+    /// Asks for a new folder name under a parent the user picks.
+    func createAndUseLabExportParentFolder() {
+        let parentPanel = NSOpenPanel()
+        parentPanel.title = "Where to create the folder"
+        parentPanel.message = "Choose the **parent** location, then you’ll be asked for the new folder’s name."
+        parentPanel.canChooseFiles = false
+        parentPanel.canChooseDirectories = true
+        parentPanel.canCreateDirectories = true
+        parentPanel.allowsMultipleSelection = false
+        parentPanel.directoryURL = labExportParentURL?.deletingLastPathComponent() ?? defaultExportBaseFolder.deletingLastPathComponent()
+        parentPanel.begin { response in
+            guard response == .OK, let parent = parentPanel.url else { return }
+            DispatchQueue.main.async {
+                self.presentNewFolderNameSheet(parentURL: parent)
+            }
+        }
+    }
+    
+    private func presentNewFolderNameSheet(parentURL: URL) {
+        let alert = NSAlert()
+        alert.messageText = "New export folder"
+        alert.informativeText = "A new folder will be created inside:\n\(parentURL.path)"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = "Image lab exports"
+        field.placeholderString = "Folder name"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        let apply: (NSApplication.ModalResponse) -> Void = { [weak self] result in
+            guard let self = self else { return }
+            if result == .alertFirstButtonReturn {
+                var name = field.stringValue
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if name.isEmpty { name = "Image lab exports" }
+                let newURL = parentURL.appendingPathComponent(name, isDirectory: true)
+                do {
+                    try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true, attributes: nil)
+                    self.labExportParentURL = newURL
+                    self.labLog("Created export base: \(newURL.path)")
+                    self.statusMessage = "✅ Exports from Image lab will use new folder: \(name)"
+                } catch {
+                    self.statusMessage = "❌ Couldn’t create folder: \(error.localizedDescription)"
+                    self.labLog("Create folder failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        if let win = NSApp.keyWindow {
+            alert.beginSheetModal(for: win, completionHandler: apply)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            apply(alert.runModal())
+        }
+    }
+    
+    /// Clears a custom base so Image lab uses Desktop/Apple Icons again.
+    func useDefaultLabExportParent() {
+        labExportParentURL = nil
+        labLog("Image lab export base: default (Desktop/Apple Icons)")
+        statusMessage = "Image lab: using default export location"
+    }
+    
     /// Finder often supplies file URLs or `public.image` instead of raw PNG bytes; try several representations.
     private func loadImageFromItemProvider(_ provider: NSItemProvider, completion: @escaping (NSImage?) -> Void) {
-        let dataTypes: [UTType] = [.png, .jpeg, .tiff, .gif, .webP, .image]
+        let dataTypes: [UTType] = [.png, .jpeg, .tiff, .gif, .webP, .heic, .image]
         
         func tryDataTypes(at index: Int) {
             if index >= dataTypes.count {
@@ -372,15 +851,27 @@ class IconResizerViewModel: ObservableObject {
         let mode = operationMode
         switch mode {
         case .imageLab:
-            guard let provider = providers.first else { return }
-            loadImageFromItemProvider(provider) { img in
-                guard let img = img else {
-                    self.statusMessage = "❌ Could not load image from drop (try PNG/JPEG or drag the file again)"
-                    self.labLog("Drop: no image from provider")
-                    return
+            if self.labCompositingMode == .collage, !providers.isEmpty {
+                self.loadAllLabImagesFromProviders(providers) { n in
+                    if n == 0 {
+                        self.statusMessage = "❌ Could not load images from drop (try PNG/JPEG)"
+                    } else {
+                        self.statusMessage = n == 1
+                            ? "✅ 1 image — add more for a collage, or set Mode to Collage to edit"
+                            : "✅ Loaded \(n) image(s) in Image lab (collage)"
+                    }
                 }
-                self.loadLabImage(img)
-                self.statusMessage = "✅ Image loaded in Image lab"
+            } else {
+                guard let provider = providers.first else { return }
+                loadImageFromItemProvider(provider) { img in
+                    guard let img = img else {
+                        self.statusMessage = "❌ Could not load image from drop (try PNG/JPEG or drag the file again)"
+                        self.labLog("Drop: no image from provider")
+                        return
+                    }
+                    self.setSingleLabImage(img)
+                    self.statusMessage = "✅ Image loaded in Image lab"
+                }
             }
         case .icons, .blogHeaders:
             guard let provider = providers.first else { return }
@@ -403,11 +894,11 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
-    private func resizeAndSaveBlogHeaders(sourceImage: NSImage) {
+    private func resizeAndSaveBlogHeaders(sourceImage: NSImage, exportBase: URL? = nil) {
         self.isProcessing = true
         self.statusMessage = "🔄 Generating web headers..."
         
-        let baseFolder = self.defaultExportBaseFolder
+        let baseFolder = exportBase ?? self.defaultExportBaseFolder
         let outputFolderURL = resolvedExportFolder(base: baseFolder, subfolder: "BlogHeaders")
         let fileManager = FileManager.default
         
@@ -480,11 +971,11 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
-    private func resizeAndSaveIcons(sourceImage: NSImage) {
+    private func resizeAndSaveIcons(sourceImage: NSImage, exportBase: URL? = nil) {
         self.isProcessing = true
         self.statusMessage = "🔄 Resizing icons..."
         
-        let baseFolder = self.defaultExportBaseFolder
+        let baseFolder = exportBase ?? self.defaultExportBaseFolder
         let outputFolderURL: URL = (self.storeSelection == .android)
             ? resolvedExportFolder(base: baseFolder, subfolder: "AndroidIcons")
             : baseFolder
@@ -1088,6 +1579,50 @@ class IconResizerViewModel: ObservableObject {
         return out
     }
     
+    /// `object-contain` — entire image visible, letterboxed with transparency if aspect ratios differ.
+    private func resizeAspectFit(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
+        let srcSize = image.size
+        guard srcSize.width > 0, srcSize.height > 0, width > 0, height > 0 else { return nil }
+        let w = width
+        let h = height
+        let scale = min(w / srcSize.width, h / srcSize.height)
+        let drawW = srcSize.width * scale
+        let drawH = srcSize.height * scale
+        let originX = (w - drawW) / 2
+        let originY = (h - drawH) / 2
+        let newSize = NSSize(width: w, height: h)
+        guard let bitmapRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(w),
+            pixelsHigh: Int(h),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return nil
+        }
+        bitmapRep.size = newSize
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSColor.clear.set()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: w, height: h)).fill()
+        image.draw(
+            in: NSRect(x: originX, y: originY, width: drawW, height: drawH),
+            from: NSRect(origin: .zero, size: srcSize),
+            operation: .copy,
+            fraction: 1.0
+        )
+        let out = NSImage(size: newSize)
+        out.addRepresentation(bitmapRep)
+        return out
+    }
+    
     private func resizeScreenshot(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
         let newSize = NSSize(width: width, height: height)
         
@@ -1253,12 +1788,62 @@ class IconResizerViewModel: ObservableObject {
     
     // MARK: - Image lab helpers
     
+    /// Pixel size of the **selected** source image.
     func labBitmapPixelSize() -> (Int, Int) {
-        guard let img = labSourceImage else { return (1, 1) }
-        if let bmp = largestBitmapRep(in: img) {
-            return (bmp.pixelsWide, bmp.pixelsHigh)
+        guard let entry = labSelectedEntry else { return (1, 1) }
+        return labPixelSize(of: entry.image)
+    }
+    
+    func setLabCompositingMode(_ mode: LabCompositingMode) {
+        if mode != labCompositingMode {
+            clearCollageUndoHistory()
         }
-        return (max(1, Int(img.size.width)), max(1, Int(img.size.height)))
+        labCompositingMode = mode
+        applyCompositingModeIfNeeded()
+        if mode == .collage {
+            clampAllCollageCanvasFrames()
+            if let p = labActiveBlogContentPreset {
+                labBlogContentFrame = defaultBlogFrameInArtboard(for: p)
+            }
+        } else if let p = labActiveBlogContentPreset,
+                  let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) {
+            labImageEntries[i].blogContentRect = defaultBlogContentRectInImage(for: p, entry: labImageEntries[i])
+        }
+    }
+    
+    /// Call after changing artboard size so layers stay inside.
+    func userChangedCollageCanvasSize() {
+        clampAllCollageCanvasFrames()
+        if labCompositingMode == .collage, labActiveBlogContentPreset != nil {
+            labBlogContentFrame = clampBlogContentFrameInArtboard(labBlogContentFrame)
+        }
+    }
+    
+    private func mutateSelectedLabEntry(_ update: (inout LabImageEntry) -> Void) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        update(&labImageEntries[i])
+        clampLabCrop(&labImageEntries[i])
+    }
+    
+    func setLabCropSize(_ v: CGFloat) { mutateSelectedLabEntry { $0.cropSize = v } }
+    func setLabCropOriginX(_ v: CGFloat) { mutateSelectedLabEntry { $0.cropOriginX = v } }
+    func setLabCropOriginY(_ v: CGFloat) { mutateSelectedLabEntry { $0.cropOriginY = v } }
+    
+    /// Used by drag-to-pan the crop region in the lab overlay.
+    func addLabCropOriginTranslation(dx: CGFloat, dy: CGFloat) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        labImageEntries[i].cropOriginX += dx
+        labImageEntries[i].cropOriginY += dy
+        clampLabCrop(&labImageEntries[i])
+    }
+    
+    /// Used by corner resize in the lab; sets O and side then clamps.
+    func setLabCropFromResize(ox: CGFloat, oy: CGFloat, size: CGFloat) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        labImageEntries[i].cropOriginX = ox
+        labImageEntries[i].cropOriginY = oy
+        labImageEntries[i].cropSize = size
+        clampLabCrop(&labImageEntries[i])
     }
     
     func labLog(_ message: String) {
@@ -1279,45 +1864,83 @@ class IconResizerViewModel: ObservableObject {
         panel.close()
     }
     
+    /// Re-decodes the image and re-centers the square crop for the **selected** entry, or sets a single image when nothing is selected.
     func loadLabImage(_ image: NSImage) {
         dismissLabChooseImagePanelIfNeeded()
-        labSourceImage = canonicalSingleLayerImage(image) ?? image
-        let (w, h) = labBitmapPixelSize()
-        let side = CGFloat(max(1, min(w, h)))
-        // Start with largest square that fits (may be < 16 px for tiny bitmaps).
-        labCropSize = side
-        labCropOriginX = (CGFloat(w) - labCropSize) / 2
-        labCropOriginY = (CGFloat(h) - labCropSize) / 2
-        clampLabCrop()
-        labLog("Loaded \(w)×\(h) px — square crop \(Int(labCropSize)) px centered")
+        if let sid = labSelectedEntryId, let i = labImageEntries.firstIndex(where: { $0.id == sid }) {
+            if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+            let keepFrame = labCompositingMode == .collage
+            let cf = keepFrame
+                ? labImageEntries[i].canvasFrame
+                : CGRect(x: 0, y: 0, width: labCollageCanvasWidth, height: labCollageCanvasHeight)
+            var e = makeLabEntry(from: image, canvasFrame: cf)
+            e.id = sid
+            clampLabCrop(&e)
+            labImageEntries[i] = e
+            if labCompositingMode == .single, let p = labActiveBlogContentPreset {
+                labImageEntries[i].blogContentRect = defaultBlogContentRectInImage(for: p, entry: labImageEntries[i])
+            }
+            let (w, h) = labPixelSize(of: e.image)
+            labLog("Re-centered crop on \(w)×\(h) px image for selected entry")
+        } else {
+            setSingleLabImage(image)
+        }
     }
     
-    func clampLabCrop() {
-        let (w, h) = labBitmapPixelSize()
+    /// Recenter the largest square on the current bitmap (no re-decode) — e.g. Reset.
+    func resetSelectedLabImageCrop() {
+        if labCompositingMode == .collage { pushCollageUndoBeforeMutation() }
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        var e = labImageEntries[i]
+        let (w, h) = labPixelSize(of: e.image)
+        let side = CGFloat(max(1, min(w, h)))
+        e.cropSize = side
+        e.cropOriginX = (CGFloat(w) - side) / 2
+        e.cropOriginY = (CGFloat(h) - side) / 2
+        clampLabCrop(&e)
+        labImageEntries[i] = e
+        labLog("Reset square to center / max for selected")
+    }
+    
+    private func clampLabCrop(_ e: inout LabImageEntry) {
+        let (w, h) = labPixelSize(of: e.image)
         let maxSide = CGFloat(max(1, min(w, h)))
         let minSide = min(16, maxSide)
-        // Integer pixel geometry (corner drags can leave sub-pixel floats and break Sliders with step 1).
-        labCropSize = CGFloat(Int(labCropSize.rounded()))
-        labCropSize = min(max(minSide, labCropSize), maxSide)
-        labCropOriginX = CGFloat(Int(labCropOriginX.rounded()))
-        labCropOriginY = CGFloat(Int(labCropOriginY.rounded()))
-        let maxOriginX = max(0, CGFloat(w) - labCropSize)
-        let maxOriginY = max(0, CGFloat(h) - labCropSize)
-        labCropOriginX = min(max(0, labCropOriginX), maxOriginX)
-        labCropOriginY = min(max(0, labCropOriginY), maxOriginY)
+        e.cropSize = CGFloat(Int(e.cropSize.rounded()))
+        e.cropSize = min(max(minSide, e.cropSize), maxSide)
+        e.cropOriginX = CGFloat(Int(e.cropOriginX.rounded()))
+        e.cropOriginY = CGFloat(Int(e.cropOriginY.rounded()))
+        let maxOriginX = max(0, CGFloat(w) - e.cropSize)
+        let maxOriginY = max(0, CGFloat(h) - e.cropSize)
+        e.cropOriginX = min(max(0, e.cropOriginX), maxOriginX)
+        e.cropOriginY = min(max(0, e.cropOriginY), maxOriginY)
     }
     
-    /// Crops the square defined in top-left pixel coordinates to a new bitmap-backed `NSImage`.
-    func croppedLabImage() -> NSImage? {
-        guard let source = labSourceImage else {
-            labLog("Crop: no source image")
-            return nil
-        }
-        let (pw, ph) = labBitmapPixelSize()
-        clampLabCrop()
-        let side = labCropSize
-        let ox = labCropOriginX
-        let oyTop = labCropOriginY
+    /// Clamps the selected live entry (e.g. aftergesture) — public for the crop overlay.
+    func clampSelectedLabEntryCrop() {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        clampLabCrop(&labImageEntries[i])
+    }
+    
+    /// Thumbnail of the current square crop for a layer (for canvas view).
+    func labPreviewCroppedTile(for e: LabImageEntry) -> NSImage? {
+        croppedSquare(from: e, log: false)
+    }
+    
+    /// **Collage editor** — full source image (so layers aren’t limited to the single-mode square crop).
+    func labCollageLayerFullImage(for e: LabImageEntry) -> NSImage? {
+        let raw = e.image
+        return flattenImageForIconPipeline(raw) ?? raw
+    }
+    
+    private func croppedSquare(from entry: LabImageEntry, log: Bool) -> NSImage? {
+        var e = entry
+        clampLabCrop(&e)
+        let source = e.image
+        let (_, ph) = labPixelSize(of: source)
+        let side = e.cropSize
+        let ox = e.cropOriginX
+        let oyTop = e.cropOriginY
         let yBottom = CGFloat(ph) - oyTop - side
         let fromRect = NSRect(x: ox, y: yBottom, width: side, height: side)
         let out = NSImage(size: NSSize(width: side, height: side))
@@ -1330,41 +1953,519 @@ class IconResizerViewModel: ObservableObject {
             fraction: 1.0
         )
         out.unlockFocus()
-        labLog("Cropped square \(Int(side)) px from origin (\(Int(ox)),\(Int(oyTop))) top-left")
+        if log {
+            labLog("Cropped square \(Int(side)) px from origin (\(Int(ox)),\(Int(oyTop))) top-left")
+        }
         return out
     }
     
-    func chooseLabImageFile() {
+    /// Freeform collage: each entry’s **full** image is aspect-fitted into that entry’s `canvasFrame` (matches editor: entire image visible in the frame, letterboxed if needed).
+    /// - Parameters:
+    ///   - exportMaxLongEdge: If `nil`, uses `labCollageOutputSize` as the longest output edge in points/pixels.
+    ///   - artboardClip: If non-`nil`, only this rectangle of the artboard (in canvas coordinates) is rendered; use for blog / article exports.
+    private func renderCollageComposite(exportMaxLongEdge: CGFloat? = nil, artboardClip: CGRect? = nil) -> NSImage? {
+        if labImageEntries.isEmpty { return nil }
+        let fullW = max(1, labCollageCanvasWidth)
+        let fullH = max(1, labCollageCanvasHeight)
+        let fullArt = CGRect(x: 0, y: 0, width: fullW, height: fullH)
+        let clip = (artboardClip.map { $0.intersection(fullArt) }) ?? fullArt
+        guard !clip.isNull, clip.width >= 1, clip.height >= 1 else { return nil }
+        let CW = clip.width
+        let CH = clip.height
+        let maxE = max(1, exportMaxLongEdge ?? labCollageOutputSize)
+        let s = maxE / max(CW, CH)
+        let W = CW * s
+        let H = CH * s
+        let Wi = max(1, Int(ceil(W)))
+        let Hi = max(1, Int(ceil(H)))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Wi,
+            pixelsHigh: Hi,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        bitmap.size = NSSize(width: W, height: H)
+        NSGraphicsContext.saveGraphicsState()
+        guard let ctx = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+        if labCollageExportWhiteBackground {
+            NSColor.white.set()
+        } else {
+            NSColor.clear.set()
+        }
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: W, height: H)).fill()
+        for entry in labImageEntries {
+            let r = entry.canvasFrame
+            if !r.intersects(clip) { continue }
+            let rClip = r.offsetBy(dx: -clip.minX, dy: -clip.minY)
+            let rDraw = r.intersection(clip).offsetBy(dx: -clip.minX, dy: -clip.minY)
+            if rDraw.isNull || rDraw.width < 0.5 || rDraw.height < 0.5 { continue }
+            let source = labCollageLayerFullImage(for: entry) ?? entry.image
+            let destW = r.size.width * s
+            let destH = r.size.height * s
+            let destX = rClip.origin.x * s
+            let destY = (CH - rClip.origin.y - rClip.size.height) * s
+            NSGraphicsContext.saveGraphicsState()
+            let clipPath = NSBezierPath(
+                rect: NSRect(
+                    x: rDraw.minX * s,
+                    y: (CH - rDraw.maxY) * s,
+                    width: rDraw.width * s,
+                    height: rDraw.height * s
+                )
+            )
+            clipPath.addClip()
+            let layerBitmap: NSImage? = entry.collageFillsFrame
+                ? resizeAspectFill(image: source, width: destW, height: destH)
+                : resizeAspectFit(image: source, width: destW, height: destH)
+            guard let fitted = layerBitmap else {
+                NSGraphicsContext.restoreGraphicsState()
+                continue
+            }
+            fitted.draw(
+                in: NSRect(x: destX, y: destY, width: destW, height: destH),
+                from: NSRect(origin: .zero, size: fitted.size),
+                operation: .copy,
+                fraction: 1.0
+            )
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let out = NSImage(size: NSSize(width: W, height: H))
+        out.addRepresentation(bitmap)
+        return out
+    }
+    
+    // MARK: - Image lab: blog / article frame & export
+    
+    private func defaultBlogFrameInArtboard(for preset: LabBlogContentPreset) -> CGRect {
+        let W = max(1, labCollageCanvasWidth)
+        let H = max(1, labCollageCanvasHeight)
+        let ar = preset.aspect
+        let w: CGFloat
+        let h: CGFloat
+        if W / H > ar {
+            h = H
+            w = h * ar
+        } else {
+            w = W
+            h = w / ar
+        }
+        let x = (W - w) / 2
+        let y = (H - h) / 2
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+    
+    private func defaultBlogContentRectInImage(for preset: LabBlogContentPreset, entry: LabImageEntry) -> CGRect {
+        let (iw, ih) = labPixelSize(of: entry.image)
+        let W = CGFloat(max(1, iw))
+        let H = CGFloat(max(1, ih))
+        let ar = preset.aspect
+        let w: CGFloat
+        let h: CGFloat
+        if W / H > ar {
+            h = H
+            w = h * ar
+        } else {
+            w = W
+            h = w / ar
+        }
+        let x = (W - w) / 2
+        let y = (H - h) / 2
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+    
+    private func clampBlogContentFrameInArtboard(_ proposed: CGRect) -> CGRect {
+        guard let p = labActiveBlogContentPreset else { return proposed }
+        let W = max(1, labCollageCanvasWidth)
+        let H = max(1, labCollageCanvasHeight)
+        let ar = p.aspect
+        var w = max(1, proposed.width)
+        var h = w / ar
+        if h > H { h = H; w = h * ar }
+        if w > W { w = W; h = w / ar }
+        w = min(w, W)
+        h = w / ar
+        if h > H { h = H; w = h * ar }
+        if w < 1 { w = 1; h = w / ar }
+        var x = proposed.minX
+        var y = proposed.minY
+        x = min(max(0, x), W - w)
+        y = min(max(0, y), H - h)
+        if x < 0 { x = 0 }
+        if y < 0 { y = 0 }
+        if w > W { w = W; h = w / ar }
+        if h > H { h = H; w = h * ar }
+        x = min(max(0, x), W - w)
+        y = min(max(0, y), H - h)
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+    
+    private func clampBlogContentRectInImage(_ e: inout LabImageEntry) {
+        guard let p = labActiveBlogContentPreset else { return }
+        var r = e.blogContentRect ?? defaultBlogContentRectInImage(for: p, entry: e)
+        let (iw, ih) = labPixelSize(of: e.image)
+        let W = CGFloat(max(1, iw))
+        let H = CGFloat(max(1, ih))
+        let ar = p.aspect
+        var w = max(1, r.width)
+        var h = w / ar
+        if h > H { h = H; w = h * ar }
+        if w > W { w = W; h = w / ar }
+        w = min(w, W)
+        h = w / ar
+        if h > H { h = H; w = h * ar }
+        r.origin.x = min(max(0, r.minX), W - w)
+        r.origin.y = min(max(0, r.minY), H - h)
+        r.size = CGSize(width: w, height: h)
+        e.blogContentRect = r
+    }
+    
+    /// Blog preset for Image Lab (dashed frame + export / apply). Passing `nil` clears the frame on all images.
+    func setLabActiveBlogContentPreset(_ preset: LabBlogContentPreset?) {
+        let was = labActiveBlogContentPreset
+        if labCompositingMode == .collage, preset != was { pushCollageUndoBeforeMutation() }
+        labActiveBlogContentPreset = preset
+        if preset == nil {
+            labBlogContentFrame = .zero
+            for i in labImageEntries.indices {
+                labImageEntries[i].blogContentRect = nil
+            }
+            return
+        }
+        guard let p = preset else { return }
+        if p != was {
+            if labCompositingMode == .collage {
+                labBlogContentFrame = defaultBlogFrameInArtboard(for: p)
+            } else if let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) {
+                labImageEntries[i].blogContentRect = defaultBlogContentRectInImage(for: p, entry: labImageEntries[i])
+            }
+        }
+    }
+    
+    /// One-tap: standard OG / blog-hero 1200×630 frame (re-centers the dashed region even if this preset is already on).
+    func applyStandardBlogHero() {
+        setLabActiveBlogContentPreset(LabBlogContentPreset.standardOG)
+        repositionDefaultBlogFrameForCurrentPreset()
+        labLog("Blog / article: 1200×630 (OG) — position the dashed frame, then export or apply crop")
+    }
+    
+    /// **Collage:** resizes the artboard to a standard blog aspect (e.g. 1200×630) and arranges all loaded images in a 2×N grid with no gaps—handy for quick social / blog composites.
+    /// Does not add images; add or drop them first, then use **Save blog PNG** to export.
+    /// Collage: set each layer’s **x** so left-to-right order is preserved and the **gaps** between layers and the **side margins** are all equal (like `space-evenly` for box widths). Y and size are unchanged.
+    func distributeCollageLayersHorizontallyEquidistant() {
+        guard labCompositingMode == .collage, !labImageEntries.isEmpty else {
+            statusMessage = "Add images in Collage mode first"
+            return
+        }
+        let W = max(1, labCollageCanvasWidth)
+        let n = labImageEntries.count
+        let order = labImageEntries.enumerated()
+            .sorted { $0.element.canvasFrame.minX < $1.element.canvasFrame.minX }
+            .map { $0.offset }
+        var totalW: CGFloat = 0
+        for i in order {
+            totalW += labImageEntries[i].canvasFrame.width
+        }
+        let slack = W - totalW
+        guard slack >= 0 else {
+            statusMessage = "Layers are wider than the artboard — narrow frames, or widen the artboard"
+            return
+        }
+        pushCollageUndoBeforeMutation()
+        let g = slack / CGFloat(n + 1)
+        var x = g
+        for i in order {
+            var r = labImageEntries[i].canvasFrame
+            r.origin.x = x
+            let clamped = clampCanvasFrame(r)
+            labImageEntries[i].canvasFrame = clamped
+            x += clamped.width + g
+        }
+        statusMessage = "✅ Spaced \(n) layer(s) with equal gaps (side margins match gaps)"
+        labLog("Distribute H: n=\(n), gap+margin=\(g), slack=\(slack)")
+    }
+    
+    func layoutCollageForStandardBlogContent(preset: LabBlogContentPreset = .standardOG) {
+        guard labCompositingMode == .collage, !labImageEntries.isEmpty else {
+            statusMessage = "Add at least one image in Collage mode first"
+            return
+        }
+        pushCollageUndoBeforeMutation()
+        let W = CGFloat(preset.targetWidth)
+        let H = CGFloat(preset.targetHeight)
+        labCollageCanvasWidth = W
+        labCollageCanvasHeight = H
+        let n = labImageEntries.count
+        if n == 1 {
+            labImageEntries[0].canvasFrame = CGRect(x: 0, y: 0, width: W, height: H)
+        } else {
+            let cols = 2
+            let rowCount = max(1, Int(ceil(Double(n) / Double(cols))))
+            let cellW = W / 2.0
+            let cellH = H / CGFloat(rowCount)
+            for i in 0..<n {
+                let col = i % cols
+                let row = i / cols
+                let x = CGFloat(col) * cellW
+                let y = CGFloat(row) * cellH
+                labImageEntries[i].canvasFrame = clampCanvasFrame(CGRect(x: x, y: y, width: cellW, height: cellH))
+            }
+        }
+        labActiveBlogContentPreset = preset
+        labBlogContentFrame = CGRect(x: 0, y: 0, width: W, height: H)
+        for i in labImageEntries.indices { labImageEntries[i].blogContentRect = nil }
+        labSelectedEntryId = labImageEntries.first?.id
+        let blogRows = n > 1 ? max(1, Int(ceil(Double(n) / 2.0))) : 1
+        let gridNote = n > 1 ? "— \(n) images, \(blogRows) row(s)" : ""
+        statusMessage = "✅ Artboard \(Int(W))×\(Int(H)) \(gridNote) — use Save blog PNG"
+        labLog("Blog quick layout: \(n) image(s) on \(Int(W))×\(Int(H)) artboard, full-frame export")
+    }
+    
+    private func repositionDefaultBlogFrameForCurrentPreset() {
+        guard let p = labActiveBlogContentPreset else { return }
+        if labCompositingMode == .collage {
+            labBlogContentFrame = defaultBlogFrameInArtboard(for: p)
+        } else if let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) {
+            labImageEntries[i].blogContentRect = defaultBlogContentRectInImage(for: p, entry: labImageEntries[i])
+        }
+    }
+    
+    func updateLabBlogContentFrame(_ frame: CGRect) {
+        if labCompositingMode == .collage, labActiveBlogContentPreset != nil {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                labBlogContentFrame = clampBlogContentFrameInArtboard(frame)
+            }
+        }
+    }
+    
+    func translateLabBlogContentFrame(dx: CGFloat, dy: CGFloat) {
+        if labCompositingMode == .collage, labActiveBlogContentPreset != nil {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                var f = labBlogContentFrame
+                f.origin.x += dx
+                f.origin.y += dy
+                labBlogContentFrame = clampBlogContentFrameInArtboard(f)
+            }
+        }
+    }
+    
+    func updateSelectedEntryBlogContentRect(_ rect: CGRect) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        labImageEntries[i].blogContentRect = rect
+        clampBlogContentRectInImage(&labImageEntries[i])
+    }
+    
+    func translateSelectedEntryBlogContentRect(dx: CGFloat, dy: CGFloat) {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        var r = labImageEntries[i].blogContentRect ?? (labActiveBlogContentPreset.map { defaultBlogContentRectInImage(for: $0, entry: labImageEntries[i]) } ?? .zero)
+        r.origin.x += dx
+        r.origin.y += dy
+        labImageEntries[i].blogContentRect = r
+        clampBlogContentRectInImage(&labImageEntries[i])
+    }
+    
+    /// Pixels at exact `preset` size (e.g. 1200×630 from the current blog frame).
+    func imageForLabBlogExport() -> NSImage? {
+        guard let preset = labActiveBlogContentPreset else { return nil }
+        if labCompositingMode == .collage {
+            return imageForLabBlogExportFromCollage(preset: preset)
+        }
+        return imageForLabBlogExportFromSingle(preset: preset)
+    }
+    
+    private func imageForLabBlogExportFromCollage(preset: LabBlogContentPreset) -> NSImage? {
+        let clip = labBlogContentFrame
+        guard clip.width >= 1, clip.height >= 1 else { return nil }
+        let maxE = max(
+            labCollageOutputSize,
+            CGFloat(preset.targetWidth),
+            CGFloat(preset.targetHeight)
+        )
+        guard let raw = renderCollageComposite(exportMaxLongEdge: maxE, artboardClip: clip) else { return nil }
+        return resizeScreenshot(
+            image: raw,
+            width: CGFloat(preset.targetWidth),
+            height: CGFloat(preset.targetHeight)
+        )
+    }
+    
+    private func imageForLabBlogExportFromSingle(preset: LabBlogContentPreset) -> NSImage? {
+        guard var e = labSelectedEntry, e.blogContentRect != nil else { return nil }
+        clampBlogContentRectInImage(&e)
+        guard let r = e.blogContentRect, let region = croppedImageFromTopLeftRect(image: e.image, topLeft: r) else { return nil }
+        return resizeScreenshot(
+            image: region,
+            width: CGFloat(preset.targetWidth),
+            height: CGFloat(preset.targetHeight)
+        )
+    }
+    
+    private func croppedImageFromTopLeftRect(image: NSImage, topLeft: CGRect) -> NSImage? {
+        let (_, ph) = labPixelSize(of: image)
+        let w = topLeft.width
+        let h = topLeft.height
+        guard w >= 1, h >= 1 else { return nil }
+        let yBottom = CGFloat(ph) - topLeft.minY - h
+        let fromRect = NSRect(x: topLeft.minX, y: yBottom, width: w, height: h)
+        let out = NSImage(size: NSSize(width: w, height: h))
+        out.lockFocus()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        image.draw(
+            in: NSRect(origin: .zero, size: out.size),
+            from: fromRect,
+            operation: .copy,
+            fraction: 1.0
+        )
+        out.unlockFocus()
+        return out
+    }
+    
+    /// Save a PNG of the current blog frame at the preset’s pixel size (e.g. 1200×630).
+    func saveLabBlogImageToFile() {
+        guard let out = imageForLabBlogExport() else {
+            statusMessage = "❌ Choose a blog size and show the blog frame, then try again"
+            return
+        }
+        guard let preset = labActiveBlogContentPreset else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "blog-\(preset.targetWidth)x\(preset.targetHeight).png"
+        panel.title = "Save blog / article image"
+        panel.begin { [weak self] response in
+            guard let self = self else { return }
+            guard response == .OK, let url = panel.url else {
+                DispatchQueue.main.async { self.labLog("Save blog image: cancelled") }
+                return
+            }
+            DispatchQueue.main.async {
+                if self.savePNG(image: out, to: url) {
+                    self.statusMessage = "✅ Saved blog image: \(url.lastPathComponent)"
+                    self.labLog("Saved blog / article image → \(url.path)")
+                    self.lastOutputFolder = url.deletingLastPathComponent()
+                } else {
+                    self.statusMessage = "❌ Could not save blog image"
+                }
+            }
+        }
+    }
+    
+    /// Replaces the lab with a **single** image: the current blog frame scaled to the preset, for continued editing.
+    func applyLabBlogCropToWorkspace() {
+        guard let out = imageForLabBlogExport() else {
+            statusMessage = "❌ Nothing to apply (enable a blog size and frame first)"
+            return
+        }
+        let (pw, ph) = labPixelSize(of: out)
+        labLog("Applied blog crop to workspace: \(pw)×\(ph) px")
+        clearCollageUndoHistory()
+        labCompositingMode = .single
+        labActiveBlogContentPreset = nil
+        var e = makeLabEntry(from: out, canvasFrame: CGRect(x: 0, y: 0, width: labCollageCanvasWidth, height: labCollageCanvasHeight))
+        e.blogContentRect = nil
+        labImageEntries = [e]
+        labSelectedEntryId = e.id
+        labBlogContentFrame = .zero
+        statusMessage = "✅ Image is now \(pw)×\(ph) px (blog crop). Use Single mode to keep editing or export again."
+    }
+    
+    /// After gestures on the single-image blog overlay.
+    func clampSelectedEntryBlogContentRect() {
+        guard let i = labImageEntries.firstIndex(where: { $0.id == labSelectedEntryId }) else { return }
+        guard labActiveBlogContentPreset != nil else { return }
+        clampBlogContentRectInImage(&labImageEntries[i])
+    }
+    
+    /// Thumbnail of the final collage for the UI.
+    func renderCollagePreviewImage(maxPixelSide: CGFloat = 400) -> NSImage? {
+        return renderCollageComposite(exportMaxLongEdge: min(maxPixelSide, 600))
+    }
+    
+    /// Single: square crop of selected. Collage: full bitmap composite.
+    func croppedLabImage() -> NSImage? {
+        if labCompositingMode == .collage {
+            if let c = renderCollageComposite() {
+                let ow = c.size.width
+                let oh = c.size.height
+                labLog("Composed collage at export \(Int(ow))×\(Int(oh)) (long edge \(Int(labCollageOutputSize)))")
+                return c
+            }
+            labLog("Collage: nothing to render")
+            return nil
+        }
+        guard let entry = labSelectedEntry else {
+            labLog("Crop: no source image")
+            return nil
+        }
+        return croppedSquare(from: entry, log: true)
+    }
+    
+    func chooseLabImageFile(appendAsCollage: Bool = false) {
         dismissLabChooseImagePanelIfNeeded()
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .image]
         panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose an image for the lab"
+        let multi = appendAsCollage && labCompositingMode == .collage
+        panel.allowsMultipleSelection = multi
+        panel.message = multi
+            ? "Choose one or more images to add to the lab"
+            : (labCompositingMode == .collage ? "Choose an image to add" : "Choose an image for the lab")
         labChooseImageOpenPanel = panel
         panel.begin { response in
             DispatchQueue.main.async {
                 switch response {
                 case .OK:
-                    guard let url = panel.url else {
+                    if multi, !panel.urls.isEmpty {
+                        if self.labCompositingMode == .collage {
+                            self.pushCollageUndoBeforeMutation()
+                        }
+                        for url in panel.urls {
+                            if let img = NSImage(contentsOf: url) {
+                                self.appendLabImage(img, recordUndo: false)
+                            } else {
+                                self.labLog("Failed to read \(url.lastPathComponent)")
+                            }
+                        }
+                        self.statusMessage = "✅ Added \(panel.urls.count) image(s)"
+                    } else if let url = panel.url {
+                        guard let img = NSImage(contentsOf: url) else {
+                            self.dismissLabChooseImagePanelIfNeeded()
+                            self.labLog("Failed to read image at \(url.lastPathComponent)")
+                            return
+                        }
+                        if self.labCompositingMode == .collage {
+                            self.appendLabImage(img)
+                            self.statusMessage = "✅ Added \(url.lastPathComponent)"
+                        } else {
+                            self.setSingleLabImage(img)
+                            self.statusMessage = "✅ Loaded \(url.lastPathComponent)"
+                        }
+                    } else {
                         self.dismissLabChooseImagePanelIfNeeded()
                         self.labLog("Open panel: no URL")
                         return
                     }
-                    guard let img = NSImage(contentsOf: url) else {
-                        self.dismissLabChooseImagePanelIfNeeded()
-                        self.labLog("Failed to read image at \(url.lastPathComponent)")
-                        return
-                    }
-                    self.loadLabImage(img)
-                    self.statusMessage = "✅ Loaded \(url.lastPathComponent)"
                 default:
                     self.dismissLabChooseImagePanelIfNeeded()
                     self.labLog("Open panel cancelled")
                 }
+                self.dismissLabChooseImagePanelIfNeeded()
             }
         }
     }
+    
     
     func saveLabCropToFile() {
         guard let cropped = croppedLabImage() else {
@@ -1374,8 +2475,13 @@ class IconResizerViewModel: ObservableObject {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "lab-crop.png"
-        panel.title = "Save square crop"
+        if labCompositingMode == .collage {
+            panel.nameFieldStringValue = "lab-composite.png"
+            panel.title = "Save composite PNG"
+        } else {
+            panel.nameFieldStringValue = "lab-crop.png"
+            panel.title = "Save square crop"
+        }
         panel.begin { response in
             guard response == .OK, let url = panel.url else {
                 DispatchQueue.main.async {
@@ -1403,7 +2509,7 @@ class IconResizerViewModel: ObservableObject {
             labLog("Export pack: no crop")
             return
         }
-        let baseFolder = self.defaultExportBaseFolder
+        let baseFolder = self.effectiveLabExportBase
         let destDir = resolvedExportFolder(base: baseFolder, subfolder: "ImageLabExports")
         let fm = FileManager.default
         do {
@@ -1426,19 +2532,38 @@ class IconResizerViewModel: ObservableObject {
     /// Returns number of files written.
     private func writeLabExportPNGPackage(cropped: NSImage, to destDir: URL) -> Int {
         var count = 0
-        let side = min(cropped.size.width, cropped.size.height)
-        let nativeURL = destDir.appendingPathComponent("imagelab-crop-native-\(Int(side))px.png")
+        let w = max(1, Int(cropped.size.width.rounded()))
+        let h = max(1, Int(cropped.size.height.rounded()))
+        let isSquare = abs(Double(w - h)) < 2
+        let nativeName = isSquare
+            ? "imagelab-crop-native-\(w)px.png"
+            : "imagelab-composite-\(w)x\(h).png"
+        let nativeURL = destDir.appendingPathComponent(nativeName)
         if savePNG(image: cropped, to: nativeURL) {
             count += 1
         }
         for px in [128, 256, 512, 1024] {
-            guard let img = resize(image: cropped, to: CGFloat(px)) else { continue }
-            let url = destDir.appendingPathComponent("imagelab-crop-\(px).png")
+            let img: NSImage? = isSquare
+                ? resize(image: cropped, to: CGFloat(px))
+                : resizeToMaxLongEdge(cropped, maxLongEdge: CGFloat(px))
+            guard let img = img else { continue }
+            let url = destDir.appendingPathComponent("imagelab-\(px).png")
             if savePNG(image: img, to: url) {
                 count += 1
             }
         }
         return count
+    }
+    
+    /// Proportionally scale so the longest side equals `maxLongEdge` (keeps aspect).
+    private func resizeToMaxLongEdge(_ image: NSImage, maxLongEdge: CGFloat) -> NSImage? {
+        let w = image.size.width
+        let h = image.size.height
+        let m = max(w, h, 1)
+        let s = maxLongEdge / m
+        let nw = max(1, w * s)
+        let nh = max(1, h * s)
+        return resizeScreenshot(image: image, width: nw, height: nh)
     }
     
     private func showOpenPanelForLabExportPack(cropped: NSImage) {
@@ -1484,15 +2609,53 @@ class IconResizerViewModel: ObservableObject {
             statusMessage = "❌ Crop failed"
             return
         }
-        let scaled = resize(image: cropped, to: 1024)
-        let toRun = scaled ?? cropped
-        if scaled != nil {
-            labLog("Normalized crop to 1024×1024 for icon export")
-        } else {
-            labLog("Using crop at native pixel size (1024 resize unavailable)")
-        }
+        let toRun: NSImage = {
+            if labCompositingMode == .collage, let a = resizeAspectFill(image: cropped, width: 1024, height: 1024) {
+                labLog("Fitted composite to 1024×1024 (aspect-fill) for App Icons")
+                return a
+            }
+            if let s = resize(image: cropped, to: 1024) {
+                labLog("Normalized to 1024×1024 for icon export")
+                return s
+            }
+            labLog("Using output at native size (1024 step unavailable)")
+            return cropped
+        }()
         labLog("Starting App Icons export from lab (current mode unchanged)")
-        resizeAndSaveIcons(sourceImage: toRun)
+        resizeAndSaveIcons(sourceImage: toRun, exportBase: effectiveLabExportBase)
+    }
+    
+    /// Web headers / OG cards: uses the current lab square crop or collage composite, same as Web headers mode.
+    func runBlogHeadersFromLabOutput() {
+        guard let img = croppedLabImage() else {
+            statusMessage = "❌ Nothing in the lab to use as source"
+            labLog("Web headers: no lab output")
+            return
+        }
+        labLog("Web headers export from lab output (aspect-fill to each preset size)")
+        resizeAndSaveBlogHeaders(sourceImage: img, exportBase: effectiveLabExportBase)
+    }
+    
+    /// App Store or Play-style screenshot buckets from the current lab output (treated as one “screenshot” source).
+    func runStoreScreenshotsFromLabOutput() {
+        guard let img = croppedLabImage() else {
+            statusMessage = "❌ Nothing in the lab to use as source"
+            labLog("Screenshots: no lab output")
+            return
+        }
+        labLog("Store screenshots from lab output (Store + device: same as Screenshot mode)")
+        let baseFolder = self.effectiveLabExportBase
+        let defaultOutputURL = resolvedExportFolder(base: baseFolder, subfolder: screenshotOutputFolderComponent())
+        let fileManager = FileManager.default
+        isProcessing = true
+        statusMessage = "🔄 Generating store screenshots from lab output..."
+        do {
+            try fileManager.createDirectory(at: defaultOutputURL, withIntermediateDirectories: true)
+            performScreenshotProcessing(images: [img], outputFolderURL: defaultOutputURL)
+        } catch {
+            isProcessing = false
+            showSavePanelForScreenshots(images: [img])
+        }
     }
 }
 
