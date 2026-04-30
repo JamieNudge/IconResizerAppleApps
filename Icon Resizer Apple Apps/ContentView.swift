@@ -12,6 +12,36 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var resizer = IconResizerViewModel()
     
+    private var isAndroidIcons: Bool {
+        resizer.operationMode == .icons && resizer.storeSelection == .android
+    }
+    
+    /// Android in App Icons or Screenshot Resizer: wide min width, scroll, no fixed height (radio export + drop + footer are taller than 980pt).
+    private var isAndroidIconsOrScreenshots: Bool {
+        resizer.storeSelection == .android
+            && (resizer.operationMode == .icons || resizer.operationMode == .screenshots)
+    }
+    
+    private var phonePlayScreenshotFooter: String {
+        let m: String
+        switch resizer.androidScreenshotExportSizeMode {
+        case .portrait: m = "Portrait: 1080×1920 per image."
+        case .landscape: m = "Landscape: 1920×1080 per image."
+        case .both: m = "Both: 1080×1920 and 1920×1080 per image."
+        }
+        return "Phone · \(m) Play: 320–3840px per side, 9:16|16:9, PNG/JPEG ≤8MB; pick 2–8. 24-bit RGB PNG."
+    }
+    
+    private var tabletPlayScreenshotFooter: String {
+        let m: String
+        switch resizer.androidScreenshotExportSizeMode {
+        case .portrait: m = "1080×1920 per image."
+        case .landscape: m = "1920×1080 per image."
+        case .both: m = "1080×1920 and 1920×1080 per image."
+        }
+        return "Tablet · \(m) Large-screen Play rules. 24-bit RGB PNG."
+    }
+    
     private static let imageLabHelpText = """
 Single: yellow square = crop; drag inside or use orange handles. \
 For blog body shots (e.g. full app window, landscape), choose “Blog / article” → “Article body — full image, max width … (native aspect)” and Save blog PNG (no square). \
@@ -26,21 +56,26 @@ Logs: left sidebar console.
         Group {
             if resizer.operationMode == .imageLab {
                 imageLabRoot
+            } else if isAndroidIconsOrScreenshots {
+                ScrollView {
+                    standardModeRoot
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 standardModeRoot
             }
         }
         .frame(
-            minWidth: resizer.operationMode == .imageLab ? 880 : 520,
-            minHeight: resizer.operationMode == .imageLab ? 520 : nil
+            minWidth: resizer.operationMode == .imageLab ? 880 : (isAndroidIconsOrScreenshots ? 1000 : 520),
+            minHeight: resizer.operationMode == .imageLab ? 520 : (isAndroidIconsOrScreenshots ? 600 : nil)
         )
         .frame(
-            width: resizer.operationMode == .imageLab ? nil : 520,
-            height: resizer.operationMode == .imageLab ? nil : 980
+            width: resizer.operationMode == .imageLab ? nil : (isAndroidIconsOrScreenshots ? 1000 : 520),
+            height: resizer.operationMode == .imageLab ? nil : (isAndroidIconsOrScreenshots ? nil : 980)
         )
         .frame(
-            maxWidth: resizer.operationMode == .imageLab ? .infinity : nil,
-            maxHeight: resizer.operationMode == .imageLab ? .infinity : nil
+            maxWidth: resizer.operationMode == .imageLab ? .infinity : (isAndroidIconsOrScreenshots ? .infinity : nil),
+            maxHeight: resizer.operationMode == .imageLab ? .infinity : (isAndroidIconsOrScreenshots ? .infinity : nil)
         )
     }
     
@@ -141,10 +176,18 @@ Logs: left sidebar console.
                 .controlSize(.small)
                 .frame(maxWidth: 440)
             }
-            Toggle(isOn: $resizer.createExportSubfolder) {
-                Text("Create a named subfolder in the destination")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Batch folder")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Picker("", selection: $resizer.createExportSubfolder) {
+                    Text("Direct").tag(false)
+                    Text("+ Category").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 300)
             }
-            .toggleStyle(.switch)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -152,6 +195,73 @@ Logs: left sidebar console.
             Rectangle()
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
         )
+    }
+    
+    // MARK: - Standard mode: export blocks (reused in single column or Android two-column)
+    
+    @ViewBuilder
+    private var standardExportLocationBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Export location")
+                .font(.subheadline.weight(.medium))
+            Picker("", selection: $resizer.createExportSubfolder) {
+                Text("Put files directly in the export folder I choose (or default “Apple Icons”)")
+                    .tag(false)
+                Text("Create an extra category folder inside that place (e.g. AndroidIcons, BlogHeaders, …)")
+                    .tag(true)
+            }
+            .labelsHidden()
+            .pickerStyle(.radioGroup)
+            .fixedSize(horizontal: false, vertical: true)
+            Text("“Direct” never adds another wrapper folder; you may still get res/, play-store/, or AppIcon.appiconset *inside* that folder for that format. “Category” adds one more level with that name so batches stay separate.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    @ViewBuilder
+    private var standardExportDestinationBlock: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Export destination")
+                .font(.subheadline.weight(.semibold))
+            if let custom = resizer.labExportParentURL {
+                Text(custom.path)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(5)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+            } else {
+                Text("Default: a folder called “Apple Icons” on your Desktop. If saving fails with a permission error, use Choose folder and pick (or create) a folder so macOS can grant write access.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
+            }
+            HStack(alignment: .center, spacing: 8) {
+                Button("Choose folder…") {
+                    resizer.chooseLabExportParentExisting()
+                }
+                if resizer.labExportParentURL != nil {
+                    Button("Use default location") {
+                        resizer.useDefaultLabExportParent()
+                    }
+                }
+                Button {
+                    resizer.openExportOutputInFinder()
+                } label: {
+                    Label("Open in Finder", systemImage: "folder")
+                }
+                .help("Show the last export in Finder, or the folder the next run will use for this mode.")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 16)
+        }
     }
     
     @ViewBuilder
@@ -202,7 +312,7 @@ Logs: left sidebar console.
                 }
             }
             
-            // Platform selector (conditional based on mode)
+            // Platform / Android Play options (two columns on wide layout when Android + App Icons)
             if resizer.operationMode != .imageLab && resizer.operationMode == .icons {
                 if resizer.storeSelection == .apple {
                     labeledSegmentedGroup(title: "Platform") {
@@ -213,11 +323,35 @@ Logs: left sidebar console.
                         }
                     }
                 } else {
-                    Text("Launcher mipmaps (ldpi → xxxhdpi) + 512×512 for Play Console")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
+                    HStack(alignment: .top, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Play & store listing")
+                                .font(.subheadline.weight(.semibold))
+                            PlayFeatureGraphicOptions(vm: resizer, horizontalPadding: 0)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                        
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Save to disk")
+                                .font(.subheadline.weight(.semibold))
+                            standardExportLocationBlock
+                            standardExportDestinationBlock
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .layoutPriority(1)
+                    .padding(.horizontal, 32)
                 }
             } else if resizer.operationMode != .imageLab && resizer.operationMode == .screenshots {
                 if resizer.storeSelection == .apple {
@@ -236,54 +370,24 @@ Logs: left sidebar console.
                             }
                         }
                     }
-                }
-            }
-            
-            Toggle(isOn: $resizer.createExportSubfolder) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Create a named subfolder in the destination")
-                    Text("When off, files go into the folder you pick or Apple Icons directly. When on, adds BlogHeaders, AndroidIcons, iPhone_Screenshots, ImageLabExports, etc.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .toggleStyle(.switch)
-            .padding(.horizontal, 40)
-            
-            // Sandboxed builds often cannot write to the default "Desktop" mirror; user-granted folder fixes that.
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Export destination")
-                    .font(.subheadline.weight(.semibold))
-                if let custom = resizer.labExportParentURL {
-                    Text(custom.path)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .lineLimit(4)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: 520, alignment: .leading)
-                } else {
-                    Text("Default: a folder called “Apple Icons” on your Desktop. If saving fails with a permission error, use Choose folder and pick (or create) a folder so macOS can grant write access.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: 520, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 10) {
-                    Button("Choose folder…") {
-                        resizer.chooseLabExportParentExisting()
-                    }
-                    if resizer.labExportParentURL != nil {
-                        Button("Use default location") {
-                            resizer.useDefaultLabExportParent()
+                    labeledSegmentedGroup(title: "Play export size") {
+                        Picker("", selection: $resizer.androidScreenshotExportSizeMode) {
+                            ForEach(AndroidScreenshotExportSizeMode.allCases, id: \.self) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
                         }
                     }
                 }
             }
-            .frame(maxWidth: 560)
-            .padding(.horizontal, 40)
-            .padding(.top, 4)
+            
+            if !isAndroidIcons {
+                standardExportLocationBlock
+                    .padding(.horizontal, 40)
+                standardExportDestinationBlock
+                    .frame(maxWidth: isAndroidIconsOrScreenshots ? 920 : 560, alignment: .leading)
+                    .padding(.horizontal, 40)
+                    .padding(.top, 8)
+            }
             
             // Drop zone
             ZStack {
@@ -343,7 +447,9 @@ Logs: left sidebar console.
                 .buttonStyle(.borderedProminent)
             }
             
-            Spacer()
+            if !isAndroidIconsOrScreenshots {
+                Spacer()
+            }
             
             // Info
             VStack(alignment: .leading, spacing: 4) {
@@ -363,7 +469,8 @@ Logs: left sidebar console.
                     
                     if resizer.storeSelection == .android {
                         Text("• res/mipmap-*/ic_launcher.png (square resize)")
-                        Text("• play-store/ic_launcher-512.png")
+                        Text("• play-store/ic_launcher-512.png (512×512, 32-bit PNG w/ alpha — aim ≤1MB)")
+                        Text("• play-store/feature-graphic-1024x500 — always 1024×500 px, full-bleed fill + aspect-fit mark (see Feature graphic)")
                         Text(resizer.createExportSubfolder
                              ? "• Saved under Desktop/Apple Icons/AndroidIcons/"
                              : "• Saved under Desktop/Apple Icons/ (res/, play-store/)")
@@ -418,11 +525,9 @@ Logs: left sidebar console.
                             Text("• 312 × 390px (Series 3/4/5)")
                         }
                     } else if resizer.androidScreenshotDevice == .phone {
-                        Text("Portrait → 1080×1920, 1440×2560")
-                        Text("Landscape → 1920×1080, 2560×1440")
+                        Text(phonePlayScreenshotFooter)
                     } else {
-                        Text("Portrait → 1200×1920, 1600×2560")
-                        Text("Landscape → 1920×1200, 2560×1600")
+                        Text(tabletPlayScreenshotFooter)
                     }
                     
                     Text(resizer.createExportSubfolder
@@ -437,7 +542,6 @@ Logs: left sidebar console.
             .padding(.horizontal, 40)
             .padding(.bottom, 20)
         }
-        .frame(width: 520, height: 980)
     }
     
     /// Segmented `Picker` titles are laid out beside the control; in a narrow window the label can wrap one letter per line. Keep the title as its own row.
@@ -483,6 +587,58 @@ Logs: left sidebar console.
         case .imageLab:
             return "Crop or collage, then save PNGs, app icons, web headers, or store screenshots"
         }
+    }
+}
+
+// MARK: - Google Play 1024×500 feature graphic options (shared: main window + Image lab)
+
+struct PlayFeatureGraphicOptions: View {
+    @ObservedObject var vm: IconResizerViewModel
+    var horizontalPadding: CGFloat = 32
+    
+    private var playFeatureBackgroundColorBinding: Binding<Color> {
+        Binding(
+            get: {
+                Color(
+                    red: Double(vm.playFeatureGraphicColorRed),
+                    green: Double(vm.playFeatureGraphicColorGreen),
+                    blue: Double(vm.playFeatureGraphicColorBlue)
+                )
+            },
+            set: { new in
+                if let c = NSColor(new).usingColorSpace(.sRGB) {
+                    vm.playFeatureGraphicColorRed = c.redComponent
+                    vm.playFeatureGraphicColorGreen = c.greenComponent
+                    vm.playFeatureGraphicColorBlue = c.blueComponent
+                }
+            }
+        )
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Launcher mipmaps (ldpi → xxxhdpi) + 512 for Play, plus feature graphic (Play requires a wide 1024×500 banner, PNG or JPEG on upload).")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+            Text("Feature graphic (1024×500, Play spec)")
+                .font(.subheadline.weight(.semibold))
+            ColorPicker("Background", selection: playFeatureBackgroundColorBinding)
+            Toggle("Branded gradient (darker toward bottom)", isOn: $vm.playFeatureGraphicUseGradient)
+            Toggle("Trim extra transparent space (bigger mark)", isOn: $vm.playFeatureGraphicTrimTransparent)
+            Toggle("Reserve ~bottom 24% (Play may overlay title)", isOn: $vm.playFeatureGraphicReserveBottomSafe)
+            TextField("App name (optional, right column)", text: $vm.playFeatureGraphicAppName)
+                .textFieldStyle(.roundedBorder)
+            TextField("Tagline (optional, under name)", text: $vm.playFeatureGraphicTagline)
+                .textFieldStyle(.roundedBorder)
+            Text("The export is always a full 2.048:1 image (1024px × 500px) with a solid or gradient background edge-to-edge, then your mark scaled to fit inside that canvas—centered in the art area, or in the left column with text on the right. That matches the Play Console guidance (don’t give them a square asset to letterbox; give them a real 1024×500 file).")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .font(.caption)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, horizontalPadding)
     }
 }
 

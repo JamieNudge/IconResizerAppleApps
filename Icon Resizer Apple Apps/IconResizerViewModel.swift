@@ -42,6 +42,16 @@ enum AndroidScreenshotDevice: String, CaseIterable {
     case tablet = "Tablet"
 }
 
+/// Which 9:16 / 16:9 export(s) to produce for Google Play (phone or tablet slot).
+enum AndroidScreenshotExportSizeMode: String, CaseIterable {
+    /// 1080×1920 (9:16) only
+    case portrait = "Portrait"
+    /// 1920×1080 (16:9) only
+    case landscape = "Landscape"
+    /// One file of each per source image
+    case both = "Both"
+}
+
 // MARK: - Image lab: single image or multi-image collage
 
 struct LabImageEntry: Identifiable, Equatable {
@@ -139,7 +149,20 @@ class IconResizerViewModel: ObservableObject {
     @Published var screenshotPlatform: ScreenshotPlatform = .iPhone
     @Published var storeSelection: StoreSelection = .apple
     @Published var androidScreenshotDevice: AndroidScreenshotDevice = .phone
-    /// When true, exports go into `base/<subfolder>` (e.g. BlogHeaders, AndroidIcons). When false, files are written directly into `base` (no extra nesting from the picker).
+    /// Play phone/tablet screenshot exports: fixed portrait, fixed landscape, or both sizes per image.
+    @Published var androidScreenshotExportSizeMode: AndroidScreenshotExportSizeMode = .portrait
+    // MARK: - Play Console feature graphic (1024×500) — “movie poster” layout
+    /// sRGB indigo-600 (Tailwind) — good default; adjust with Play feature color controls in the UI.
+    @Published var playFeatureGraphicColorRed: CGFloat = 0.29
+    @Published var playFeatureGraphicColorGreen: CGFloat = 0.27
+    @Published var playFeatureGraphicColorBlue: CGFloat = 0.9
+    @Published var playFeatureGraphicUseGradient: Bool = true
+    @Published var playFeatureGraphicAppName: String = ""
+    @Published var playFeatureGraphicTagline: String = ""
+    @Published var playFeatureGraphicTrimTransparent: Bool = true
+    /// Leave the bottom ~24% as solid brand only (Play may overlay title UI there).
+    @Published var playFeatureGraphicReserveBottomSafe: Bool = true
+    /// When true, exports go into `base/<subfolder>` (e.g. BlogHeaders, AndroidIcons). When false, files are written directly into `base` (no extra wrapper folder).
     @Published var createExportSubfolder: Bool = false
     /// When set, **all** default exports (Image lab, Web headers, icons, screenshots) use this folder as the base instead of `Desktop/Apple Icons` / the sandbox mirror. Choose via the open panel so macOS grants write access.
     @Published var labExportParentURL: URL? = nil
@@ -622,11 +645,13 @@ class IconResizerViewModel: ObservableObject {
     }
     
     /// Resolves the folder that receives export files for a given base (default `Apple Icons` or a folder chosen in the open panel).
+    /// If the user already opened a folder whose name matches `subfolder` (e.g. they navigated into `BlogHeaders` and the option is on), do not add a second `BlogHeaders/BlogHeaders` level.
     private func resolvedExportFolder(base: URL, subfolder: String) -> URL {
-        if createExportSubfolder {
-            return base.appendingPathComponent(subfolder, isDirectory: true)
+        guard createExportSubfolder else { return base }
+        if base.lastPathComponent.compare(subfolder, options: .caseInsensitive) == .orderedSame {
+            return base
         }
-        return base
+        return base.appendingPathComponent(subfolder, isDirectory: true)
     }
     
     /// Base directory for Image lab pack exports and lab-triggered blog/icons/screenshot runs (`nil` → `defaultExportBaseFolder`).
@@ -715,6 +740,40 @@ class IconResizerViewModel: ObservableObject {
         labExportParentURL = nil
         labLog("Export base: default (Desktop/Apple Icons)")
         statusMessage = "Using default export location (Desktop/Apple Icons)"
+    }
+    
+    /// Reveals the most recent successful export in Finder, or the folder the current mode would use next (creates it if needed).
+    func openExportOutputInFinder() {
+        let target: URL
+        if let last = lastOutputFolder, FileManager.default.fileExists(atPath: last.path) {
+            target = last
+        } else {
+            target = urlForOpenInFinderResolvingCurrentMode()
+        }
+        do {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            statusMessage = "❌ Couldn’t open export folder: \(error.localizedDescription)"
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([target])
+    }
+    
+    private func urlForOpenInFinderResolvingCurrentMode() -> URL {
+        let base = effectiveLabExportBase
+        switch operationMode {
+        case .screenshots:
+            return resolvedExportFolder(base: base, subfolder: screenshotOutputFolderComponent())
+        case .icons:
+            if storeSelection == .android {
+                return resolvedExportFolder(base: base, subfolder: "AndroidIcons")
+            }
+            return base
+        case .blogHeaders:
+            return resolvedExportFolder(base: base, subfolder: "BlogHeaders")
+        case .imageLab:
+            return resolvedExportFolder(base: base, subfolder: "ImageLabExports")
+        }
     }
     
     /// Finder often supplies file URLs or `public.image` instead of raw PNG bytes; try several representations.
@@ -840,6 +899,13 @@ class IconResizerViewModel: ObservableObject {
         let flat = NSImage(size: NSSize(width: wi, height: hi))
         flat.addRepresentation(bitmapRep)
         return flat
+    }
+    
+    /// Pixels, Display P3, and multi-rep `NSImage` sources often draw as **all black** when scaled with `NSImage.draw` into a 3-ch `deviceRGB` bitmap. Flatten to one 8bpc RGBA layer, then scale.
+    private func imageNormalizedForScaling(_ image: NSImage) -> NSImage {
+        if let f = flattenImageForIconPipeline(image) { return f }
+        if let c = canonicalSingleLayerImage(image) { return c }
+        return image
     }
     
     // iOS AppIcon sizes with proper Xcode asset catalog structure
@@ -975,22 +1041,29 @@ class IconResizerViewModel: ObservableObject {
         AndroidLauncherIconConfig(mipmapFolder: "mipmap-xxxhdpi", pixelSize: 192)
     ]
     
-    let androidPhonePortraitSizes: [ScreenshotConfig] = [
-        ScreenshotConfig(filename: "Android-1080x1920.png", width: 1080, height: 1920, description: "Phone FHD portrait"),
-        ScreenshotConfig(filename: "Android-1440x2560.png", width: 1440, height: 2560, description: "Phone QHD portrait")
+    // MARK: - Google Play screenshot sizes (phone + tablet)
+    // One export per source image, matching Play’s phone rule: 9:16 or 16:9, each side 320–3840px, PNG/JPEG ≤8MB.
+    // We use 1080×1920 (portrait) and 1920×1080 (landscape) — same as Google’s “promotion” minimums; upload 2–8 of these to the phone slot.
+    private static let playStorePortrait9x16: [ScreenshotConfig] = [
+        ScreenshotConfig(
+            filename: "Android-1080x1920.png",
+            width: 1080, height: 1920,
+            description: "9:16 portrait (1080×1920) — Play phone screenshots"
+        )
     ]
-    let androidPhoneLandscapeSizes: [ScreenshotConfig] = [
-        ScreenshotConfig(filename: "Android-1920x1080.png", width: 1920, height: 1080, description: "Phone FHD landscape"),
-        ScreenshotConfig(filename: "Android-2560x1440.png", width: 2560, height: 1440, description: "Phone QHD landscape")
+    private static let playStoreLandscape16x9: [ScreenshotConfig] = [
+        ScreenshotConfig(
+            filename: "Android-1920x1080.png",
+            width: 1920, height: 1080,
+            description: "16:9 landscape (1920×1080) — Play phone screenshots"
+        )
     ]
-    let androidTabletPortraitSizes: [ScreenshotConfig] = [
-        ScreenshotConfig(filename: "Android-1200x1920.png", width: 1200, height: 1920, description: "10\" tablet portrait"),
-        ScreenshotConfig(filename: "Android-1600x2560.png", width: 1600, height: 2560, description: "Tablet portrait")
-    ]
-    let androidTabletLandscapeSizes: [ScreenshotConfig] = [
-        ScreenshotConfig(filename: "Android-1920x1200.png", width: 1920, height: 1200, description: "10\" tablet landscape"),
-        ScreenshotConfig(filename: "Android-2560x1600.png", width: 2560, height: 1600, description: "Tablet landscape")
-    ]
+    /// Phone listing: one 9:16 or one 16:9 file per dropped image (orientation auto-detected).
+    let androidPhonePortraitSizes: [ScreenshotConfig] = IconResizerViewModel.playStorePortrait9x16
+    let androidPhoneLandscapeSizes: [ScreenshotConfig] = IconResizerViewModel.playStoreLandscape16x9
+    /// 7" / 10" / Chromebook: same 9:16 and 16:9 sizes as in Play’s large-screen / tablet guidance.
+    let androidTabletPortraitSizes: [ScreenshotConfig] = IconResizerViewModel.playStorePortrait9x16
+    let androidTabletLandscapeSizes: [ScreenshotConfig] = IconResizerViewModel.playStoreLandscape16x9
     
     /// Subfolder name under the output base for screenshot batches.
     private func screenshotOutputFolderComponent() -> String {
@@ -1001,6 +1074,25 @@ class IconResizerViewModel: ObservableObject {
             }
         }
         return "\(screenshotPlatform.rawValue)_Screenshots"
+    }
+    
+    /// Play: portrait (1080×1920), landscape (1920×1080), or both — ignores source aspect unless you rely on a single size.
+    private func androidPlayScreenshotConfigs() -> [ScreenshotConfig] {
+        let portrait: [ScreenshotConfig]
+        let landscape: [ScreenshotConfig]
+        switch androidScreenshotDevice {
+        case .phone:
+            portrait = androidPhonePortraitSizes
+            landscape = androidPhoneLandscapeSizes
+        case .tablet:
+            portrait = androidTabletPortraitSizes
+            landscape = androidTabletLandscapeSizes
+        }
+        switch androidScreenshotExportSizeMode {
+        case .portrait: return portrait
+        case .landscape: return landscape
+        case .both: return portrait + landscape
+        }
     }
     
     func handleDrop(providers: [NSItemProvider]) {
@@ -1072,7 +1164,7 @@ class IconResizerViewModel: ObservableObject {
     private func showSavePanelForBlogHeaders(sourceImage: NSImage) {
         let savePanel = NSOpenPanel()
         savePanel.title = "Choose Output Folder"
-        savePanel.message = "Select where to save the BlogHeaders folder"
+        savePanel.message = "Choose the folder to write into. With “category subfolder” on in the app, a BlogHeaders folder is added inside; with direct export, files go right in the folder you pick."
         savePanel.canChooseFiles = false
         savePanel.canChooseDirectories = true
         savePanel.canCreateDirectories = true
@@ -1156,8 +1248,8 @@ class IconResizerViewModel: ObservableObject {
         let savePanel = NSOpenPanel()
         savePanel.title = "Choose Output Folder"
         savePanel.message = self.storeSelection == .android
-            ? "Select where to save the AndroidIcons folder (res + Play 512)"
-            : "Select where to save the app icons"
+            ? "Choose the export folder. Direct mode: res/ and play-store/ go here. With category subfolder: an AndroidIcons folder is created inside the folder you pick."
+            : "Choose the folder. Direct mode: icons go here. With category subfolder on, a named folder is added (see the export location setting)."
         savePanel.canChooseFiles = false
         savePanel.canChooseDirectories = true
         savePanel.canCreateDirectories = true
@@ -1287,11 +1379,12 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
-    /// Writes `res/mipmap-*/ic_launcher.png` plus `play-store/ic_launcher-512.png` under `outputFolderURL`.
+    /// Writes `res/mipmap-*/ic_launcher.png`, `play-store/ic_launcher-512.png` (32-bit RGBA), and `play-store/feature-graphic-1024x500.png` (pixel-exact 1024×500, full-bleed background, aspect-fit mark) under `outputFolderURL`.
     private func performAndroidIconProcessing(sourceImage: NSImage, outputFolderURL: URL) {
         DispatchQueue.main.async {
             let workImage = self.flattenImageForIconPipeline(sourceImage) ?? sourceImage
             let fileManager = FileManager.default
+            let playStoreIconMaxBytes: UInt64 = 1_000_000
             do {
                 try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
                 let resRoot = outputFolderURL.appendingPathComponent("res", isDirectory: true)
@@ -1309,14 +1402,34 @@ class IconResizerViewModel: ObservableObject {
                         }
                     }
                 }
+                var storeIconSizeWarning: String?
                 if let listing = self.resize(image: workImage, to: 512) {
                     let file512 = playStoreRoot.appendingPathComponent("ic_launcher-512.png")
                     if self.savePNG(image: listing, to: file512) {
                         totalGenerated += 1
+                        if let attrs = try? fileManager.attributesOfItem(atPath: file512.path),
+                           let fsize = attrs[.size] as? NSNumber {
+                            let bytes = fsize.uint64Value
+                            if bytes > playStoreIconMaxBytes {
+                                let kb = max(1, Int(bytes / 1000))
+                                storeIconSizeWarning = "ic_launcher-512.png is \(kb)KB — Google Play wants ≤1MB. Simplify artwork or recompress the PNG in another tool."
+                                print("⚠️ Play store icon exceeds 1MB: \(file512.path) (\(bytes) bytes)")
+                            }
+                        }
+                    }
+                }
+                if let feature = self.renderPlayStoreFeatureGraphic1024x500(source: workImage) {
+                    let fgURL = playStoreRoot.appendingPathComponent("feature-graphic-1024x500.png")
+                    if self.savePNG(image: feature, to: fgURL) {
+                        totalGenerated += 1
                     }
                 }
                 self.isProcessing = false
-                self.statusMessage = "✅ Generated \(totalGenerated) Android launcher assets (mipmaps + 512)!"
+                var msg = "✅ Generated \(totalGenerated) Android launcher assets (mipmaps + Play store 512 + feature graphic)!"
+                if let w = storeIconSizeWarning {
+                    msg += " \(w)"
+                }
+                self.statusMessage = msg
                 self.lastOutputFolder = outputFolderURL
                 print("✅ Generated \(totalGenerated) Android launcher assets")
                 print("📂 Location: \(outputFolderURL.path)")
@@ -1385,7 +1498,7 @@ class IconResizerViewModel: ObservableObject {
     private func showSavePanelForScreenshots(images: [NSImage]) {
         let savePanel = NSOpenPanel()
         savePanel.title = "Choose Output Folder"
-        savePanel.message = "Select where to save the \(images.count) screenshots"
+        savePanel.message = "Choose the folder. Direct: screenshots are saved there. With category subfolder: a device subfolder (e.g. iPhone_Screenshots) is added inside."
         savePanel.canChooseFiles = false
         savePanel.canChooseDirectories = true
         savePanel.canCreateDirectories = true
@@ -1433,17 +1546,11 @@ class IconResizerViewModel: ObservableObject {
                 // Process each image
                 for (index, sourceImage) in images.enumerated() {
                     let imageNumber = index + 1
-                    let isPortrait = sourceImage.size.height > sourceImage.size.width
-                    
                     let configs: [ScreenshotConfig]
                     if self.storeSelection == .android {
-                        switch self.androidScreenshotDevice {
-                        case .phone:
-                            configs = isPortrait ? self.androidPhonePortraitSizes : self.androidPhoneLandscapeSizes
-                        case .tablet:
-                            configs = isPortrait ? self.androidTabletPortraitSizes : self.androidTabletLandscapeSizes
-                        }
+                        configs = self.androidPlayScreenshotConfigs()
                     } else {
+                        let isPortrait = sourceImage.size.height > sourceImage.size.width
                         switch self.screenshotPlatform {
                         case .iPhone:
                             configs = isPortrait ? self.iPhonePortraitSizes : self.iPhoneLandscapeSizes
@@ -1455,10 +1562,12 @@ class IconResizerViewModel: ObservableObject {
                     }
                     
                     // Generate each size for this image
+                    let useOpaquePlay = self.storeSelection == .android
                     for config in configs {
-                        if let resizedImage = self.resizeScreenshot(image: sourceImage,
-                                                                     width: config.width,
-                                                                     height: config.height) {
+                        let resizedImage: NSImage? = useOpaquePlay
+                            ? self.resizeScreenshotOpaque(image: sourceImage, width: config.width, height: config.height)
+                            : self.resizeScreenshot(image: sourceImage, width: config.width, height: config.height)
+                        if let resizedImage = resizedImage {
                             // Include image number in filename: Screenshot_01_1242x2688.png
                             let filename = "Screenshot_\(String(format: "%02d", imageNumber))_\(Int(config.width))x\(Int(config.height)).png"
                             let fileURL = outputFolderURL.appendingPathComponent(filename)
@@ -1544,15 +1653,12 @@ class IconResizerViewModel: ObservableObject {
                     let isPortrait = sourceImage.size.height > sourceImage.size.width
                     
                     if self.storeSelection == .android {
-                        switch self.androidScreenshotDevice {
-                        case .phone:
-                            configs = isPortrait ? self.androidPhonePortraitSizes : self.androidPhoneLandscapeSizes
-                            platformName = "Android Phone"
-                            orientationName = isPortrait ? "Portrait" : "Landscape"
-                        case .tablet:
-                            configs = isPortrait ? self.androidTabletPortraitSizes : self.androidTabletLandscapeSizes
-                            platformName = "Android Tablet"
-                            orientationName = isPortrait ? "Portrait" : "Landscape"
+                        configs = self.androidPlayScreenshotConfigs()
+                        platformName = self.androidScreenshotDevice == .phone ? "Android Phone" : "Android Tablet"
+                        switch self.androidScreenshotExportSizeMode {
+                        case .portrait: orientationName = "Portrait 1080×1920"
+                        case .landscape: orientationName = "Landscape 1920×1080"
+                        case .both: orientationName = "Portrait + landscape"
                         }
                     } else {
                         switch self.screenshotPlatform {
@@ -1572,10 +1678,12 @@ class IconResizerViewModel: ObservableObject {
                     }
                     
                     // Generate screenshots directly to output folder
+                    let useOpaquePlay = self.storeSelection == .android
                     for config in configs {
-                        if let resizedImage = self.resizeScreenshot(image: sourceImage,
-                                                                     width: config.width,
-                                                                     height: config.height) {
+                        let resizedImage: NSImage? = useOpaquePlay
+                            ? self.resizeScreenshotOpaque(image: sourceImage, width: config.width, height: config.height)
+                            : self.resizeScreenshot(image: sourceImage, width: config.width, height: config.height)
+                        if let resizedImage = resizedImage {
                             let fileURL = outputFolderURL.appendingPathComponent(config.filename)
                             if self.savePNG(image: resizedImage, to: fileURL) {
                                 totalGenerated += 1
@@ -1735,14 +1843,16 @@ class IconResizerViewModel: ObservableObject {
         return out
     }
     
-    /// `object-contain` — entire image visible, letterboxed with transparency if aspect ratios differ.
+    /// `object-contain` — entire image visible, letterboxed if aspect ratios differ.
     /// - Parameters `anchorX` / `anchorY`: 0…1 position of the fitted image in the box (AppKit bottom-left; y=0 bottom, y=1 top).
+    /// - Parameter background: fill behind letterboxing (default clear). Use white for Play feature graphics.
     private func resizeAspectFit(
         image: NSImage,
         width: CGFloat,
         height: CGFloat,
         anchorX: CGFloat = 0.5,
-        anchorY: CGFloat = 0.5
+        anchorY: CGFloat = 0.5,
+        background: NSColor = .clear
     ) -> NSImage? {
         let srcSize = image.size
         guard srcSize.width > 0, srcSize.height > 0, width > 0, height > 0 else { return nil }
@@ -1775,7 +1885,7 @@ class IconResizerViewModel: ObservableObject {
         defer { NSGraphicsContext.restoreGraphicsState() }
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
         NSGraphicsContext.current?.imageInterpolation = .high
-        NSColor.clear.set()
+        background.set()
         NSBezierPath(rect: NSRect(x: 0, y: 0, width: w, height: h)).fill()
         image.draw(
             in: NSRect(x: originX, y: originY, width: drawW, height: drawH),
@@ -1788,7 +1898,204 @@ class IconResizerViewModel: ObservableObject {
         return out
     }
     
+    // MARK: - Google Play: feature graphic composition
+    
+    private func playFeatureBaseNSColor() -> NSColor {
+        NSColor(
+            srgbRed: min(1, max(0, playFeatureGraphicColorRed)),
+            green: min(1, max(0, playFeatureGraphicColorGreen)),
+            blue: min(1, max(0, playFeatureGraphicColorBlue)),
+            alpha: 1
+        )
+    }
+    
+    /// Removes fully transparent border so `resizeAspectFit` can scale the mark larger (ignores source canvas padding).
+    private func imageByTrimmingTransparentMargins(_ image: NSImage) -> NSImage? {
+        let flat = flattenImageForIconPipeline(image) ?? image
+        guard let best = largestBitmapRep(in: flat) else { return image }
+        let w = best.pixelsWide, h = best.pixelsHigh
+        guard w >= 1, h >= 1, best.hasAlpha, best.bitsPerPixel == 32, best.samplesPerPixel == 4 else { return image }
+        guard let src = best.bitmapData else { return image }
+        let bpr = best.bytesPerRow
+        let srcBytes = bpr * h
+        var minX = w, minY = h
+        var maxX = -1, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w {
+                let o = y * bpr + x * 4
+                if o + 3 >= srcBytes { continue }
+                let a = Int(src[o + 3])
+                if a > 8 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                    if y < minY { minY = y }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+        if maxX < minX { return image }
+        let rw = maxX - minX + 1, rh = maxY - minY + 1
+        guard let dst = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: rw,
+            pixelsHigh: rh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return image }
+        dst.size = NSSize(width: rw, height: rh)
+        guard let dstData = dst.bitmapData, dst.bitsPerPixel == 32, dst.bytesPerRow > 0 else { return image }
+        let dstByteCount = dst.bytesPerRow * rh
+        for y in 0..<rh {
+            for x in 0..<rw {
+                let s = (y + minY) * bpr + (x + minX) * 4
+                let d = y * dst.bytesPerRow + x * 4
+                for k in 0..<4 {
+                    if s + k < srcBytes, d + k < dstByteCount { dstData[d + k] = src[s + k] }
+                }
+            }
+        }
+        let out = NSImage(size: dst.size)
+        out.addRepresentation(dst)
+        return out
+    }
+    
+    /// Draws `image` in `box` (AppKit bottom-left) with the same “aspect fit + centered” rules as a hand-made 1024×500 artboard — no sub-bitmap with transparent side padding.
+    private func drawImageAspectFitCenteredInBox(
+        _ image: NSImage,
+        source: NSRect,
+        box: NSRect
+    ) {
+        let sw = source.width, sh = source.height
+        guard sw > 0, sh > 0, box.width > 0, box.height > 0 else { return }
+        let scale = min(box.width / sw, box.height / sh)
+        let outW = sw * scale, outH = sh * scale
+        let ox = box.minX + (box.width - outW) / 2
+        let oy = box.minY + (box.height - outH) / 2
+        image.draw(
+            in: NSRect(x: ox, y: oy, width: outW, height: outH),
+            from: source,
+            operation: .sourceOver,
+            fraction: 1.0
+        )
+    }
+    
+    /// 1024×500 Play feature graphic: **pixel-exact** wide banner (2.048:1), full-bleed brand fill, then mark drawn with aspect fit so the file matches Play’s spec (avoids a square-aspect upload with letterbox preview).
+    private func renderPlayStoreFeatureGraphic1024x500(source workImage: NSImage) -> NSImage? {
+        let canvasW: CGFloat = 1024, canvasH: CGFloat = 500
+        var hero = workImage
+        if playFeatureGraphicTrimTransparent, let t = imageByTrimmingTransparentMargins(hero) {
+            hero = t
+        }
+        if let canonical = canonicalSingleLayerImage(hero) { hero = canonical }
+        let base = playFeatureBaseNSColor()
+        let darker: NSColor = (base.blended(withFraction: 0.4, of: .black) ?? base).usingColorSpace(.sRGB) ?? base
+        let name = playFeatureGraphicAppName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sub = playFeatureGraphicTagline.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasText = !name.isEmpty || !sub.isEmpty
+        let bottomPad: CGFloat = playFeatureGraphicReserveBottomSafe ? min(150, max(0, round(canvasH * 0.24))) : 20
+        let heroH: CGFloat = canvasH - bottomPad
+        let margin: CGFloat = 20
+        let textColumnX: CGFloat = 520
+        let iconFieldW: CGFloat = hasText ? (textColumnX - margin) : (canvasW - 2 * margin)
+        let iconFieldH: CGFloat = max(80, heroH - 2 * margin)
+        let fromRect = NSRect(
+            x: 0, y: 0,
+            width: hero.size.width, height: hero.size.height
+        )
+        let iconFieldRect = NSRect(
+            x: margin, y: bottomPad + margin,
+            width: iconFieldW, height: iconFieldH
+        )
+        guard let canvas = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 1024,
+            pixelsHigh: 500,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        canvas.size = NSSize(width: canvasW, height: canvasH)
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let full = NSRect(x: 0, y: 0, width: canvasW, height: canvasH)
+        if playFeatureGraphicUseGradient,
+           let g = NSGradient(
+            colors: [base, darker],
+            atLocations: [0, 1],
+            colorSpace: .sRGB
+           ) {
+            g.draw(in: full, angle: 90)
+        } else {
+            base.set()
+            full.fill()
+        }
+        drawImageAspectFitCenteredInBox(hero, source: fromRect, box: iconFieldRect)
+        if hasText {
+            let shadow = NSShadow()
+            shadow.shadowBlurRadius = 3
+            shadow.shadowColor = NSColor(white: 0, alpha: 0.45)
+            shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+            let pStyle = NSMutableParagraphStyle()
+            pStyle.lineBreakMode = .byWordWrapping
+            pStyle.alignment = .left
+            pStyle.paragraphSpacing = 4
+            let textRect = NSRect(
+                x: textColumnX + 8,
+                y: bottomPad + margin,
+                width: canvasW - textColumnX - 24,
+                height: max(0, heroH - 2 * margin)
+            )
+            let m = NSMutableAttributedString()
+            if !name.isEmpty {
+                m.append(NSAttributedString(string: name, attributes: [
+                    .font: NSFont.systemFont(ofSize: 32, weight: .bold),
+                    .foregroundColor: NSColor.white,
+                    .paragraphStyle: pStyle,
+                    .shadow: shadow
+                ]))
+            }
+            if !name.isEmpty && !sub.isEmpty { m.append(NSAttributedString(string: "\n", attributes: [:])) }
+            if !sub.isEmpty {
+                m.append(NSAttributedString(string: sub, attributes: [
+                    .font: NSFont.systemFont(ofSize: 18, weight: .regular),
+                    .foregroundColor: NSColor(white: 0.95, alpha: 1),
+                    .paragraphStyle: pStyle,
+                    .shadow: shadow
+                ]))
+            }
+            let b = m.boundingRect(
+                with: NSSize(width: textRect.width, height: 10_000),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            )
+            let drawH = min(b.height, textRect.height)
+            let drawY = textRect.minY + max(0, (textRect.height - b.height) / 2)
+            m.draw(
+                in: NSRect(
+                    x: textRect.minX,
+                    y: drawY,
+                    width: textRect.width,
+                    height: drawH
+                )
+            )
+        }
+        let out = NSImage(size: NSSize(width: canvasW, height: canvasH))
+        out.addRepresentation(canvas)
+        return out
+    }
+    
     private func resizeScreenshot(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
+        let src = imageNormalizedForScaling(image)
         let newSize = NSSize(width: width, height: height)
         
         // Create bitmap with exact pixel dimensions (not points)
@@ -1813,17 +2120,57 @@ class IconResizerViewModel: ObservableObject {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
         NSGraphicsContext.current?.imageInterpolation = .high
         
-        // Draw image scaled to fit the exact dimensions
-        image.draw(in: NSRect(origin: .zero, size: newSize),
-                   from: NSRect(origin: .zero, size: image.size),
-                   operation: .copy,
-                   fraction: 1.0)
+        // Draw image scaled to the exact store dimensions
+        let from = NSRect(origin: .zero, size: src.size)
+        src.draw(
+            in: NSRect(origin: .zero, size: newSize),
+            from: from,
+            operation: .copy,
+            fraction: 1.0
+        )
         
         NSGraphicsContext.restoreGraphicsState()
         
         let resizedImage = NSImage(size: newSize)
         resizedImage.addRepresentation(bitmapRep)
         
+        return resizedImage
+    }
+    
+    /// Google Play: opaque-looking PNGs on a white letterbox. Uses RGBA 8bpc (not 3-ch RGB) + sourceOver so P3 / odd reps don’t draw black on macOS.
+    private func resizeScreenshotOpaque(image: NSImage, width: CGFloat, height: CGFloat) -> NSImage? {
+        let src = imageNormalizedForScaling(image)
+        let newSize = NSSize(width: width, height: height)
+        guard let bitmapRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(width),
+            pixelsHigh: Int(height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            return nil
+        }
+        bitmapRep.size = newSize
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmapRep)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        NSColor.white.set()
+        NSBezierPath(rect: NSRect(origin: .zero, size: newSize)).fill()
+        let from = NSRect(origin: .zero, size: src.size)
+        src.draw(
+            in: NSRect(origin: .zero, size: newSize),
+            from: from,
+            operation: .sourceOver,
+            fraction: 1.0
+        )
+        NSGraphicsContext.restoreGraphicsState()
+        let resizedImage = NSImage(size: newSize)
+        resizedImage.addRepresentation(bitmapRep)
         return resizedImage
     }
     
@@ -2834,7 +3181,7 @@ class IconResizerViewModel: ObservableObject {
     private func showOpenPanelForLabExportPack(cropped: NSImage) {
         let panel = NSOpenPanel()
         panel.title = "Choose folder for lab exports"
-        panel.message = "Select a folder. Files go inside it or in ImageLabExports when the subfolder option is on."
+        panel.message = "Choose a folder. Direct: pack files go straight into that folder. + Category: an ImageLabExports subfolder is created inside it. (Matches the image lab toolbar setting.)"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true

@@ -71,7 +71,7 @@ struct ImageCropLabView: View {
     }
     
     private var labExportPackHelp: String {
-        let base = "Native pixel size plus 128, 256, 512, and 1024 in Desktop/Apple Icons or ImageLabExports when the subfolder option is on."
+        let base = "Native pixel size plus 128, 256, 512, and 1024: into your export folder directly, or into ImageLabExports under it when “+ Category” is on in the toolbar."
         if vm.labCompositingMode == .single, vm.labActiveBlogContentPreset != nil {
             return "Uses the blog frame output (same as Save as PNG when a blog size is on), then generates resized copies. " + base
         }
@@ -80,7 +80,7 @@ struct ImageCropLabView: View {
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            leftControlScroll
+            leftSidebar
                 .layoutPriority(0)
             Divider()
             rightWorkArea
@@ -89,7 +89,18 @@ struct ImageCropLabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
     
-    private var leftControlScroll: some View {
+    /// Controls scroll above; console is pinned to the bottom with a fixed cap so the column never grows past the window.
+    private var leftSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            leftControlsScrollable
+            Divider()
+            labConsoleSection
+        }
+        .frame(minWidth: 400, idealWidth: 500, maxWidth: 560, maxHeight: .infinity, alignment: .top)
+        .clipped()
+    }
+    
+    private var leftControlsScrollable: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 labLabeledRow(title: "Working mode") {
@@ -508,18 +519,14 @@ struct ImageCropLabView: View {
                 if !vm.labImageEntries.isEmpty {
                     labOutputPipelineSection
                 }
-                
-                labConsoleSection
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
             // Bounded width so Text and controls wrap instead of growing into the canvas (ScrollView can propose infinite width to children without this).
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // Wider than before: canvas can shrink; keeps controls and button labels from truncating.
-        .frame(minWidth: 400, idealWidth: 500, maxWidth: 560, alignment: .leading)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .clipped()
+        // `minHeight: 0` lets the controls column shrink in short windows so the outer layout stays within the window height.
+        .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
     
     private var rightWorkArea: some View {
@@ -636,9 +643,8 @@ struct ImageCropLabView: View {
                         .controlSize(.small)
                     }
                 } else {
-                    Text("Launcher mipmaps (ldpi → xxxhdpi) + 512 for Play")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    PlayFeatureGraphicOptions(vm: vm, horizontalPadding: 0)
+                        .padding(.top, 4)
                 }
                 Button("Generate app icon set from lab image") {
                     vm.runIconsFromLabCrop()
@@ -688,8 +694,18 @@ struct ImageCropLabView: View {
                         .pickerStyle(.segmented)
                         .controlSize(.small)
                     }
+                    labLabeledRow(title: "Play export size") {
+                        Picker("", selection: $vm.androidScreenshotExportSizeMode) {
+                            ForEach(AndroidScreenshotExportSizeMode.allCases, id: \.self) { m in
+                                Text(m.rawValue).tag(m)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                    }
                 }
-                Text("One set of store sizes from the lab image; orientation is detected automatically.")
+                Text("Play: portrait 1080×1920, landscape 1920×1080, or one of each (Both) — same as Screenshot Resizer mode.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Button("Generate store screenshot set") {
@@ -703,7 +719,7 @@ struct ImageCropLabView: View {
         .padding(.top, 4)
     }
     
-    /// Appended in the same vertical scroll as the rest of the lab so the log never overlaps the crop view.
+    /// Pinned under scrolling controls: bounded height, log lines scroll inside.
     private var labConsoleSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Console")
@@ -719,12 +735,14 @@ struct ImageCropLabView: View {
                     }
                 }
             }
-            .frame(minHeight: 80, maxHeight: 200)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .clipped()
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.06)))
         }
-        .padding(.top, 4)
+        .frame(maxWidth: .infinity, minHeight: 100, maxHeight: 200, alignment: .leading)
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.06)))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
     
     private func cropBinding(get: @escaping () -> CGFloat, set: @escaping (CGFloat) -> Void) -> Binding<CGFloat> {
