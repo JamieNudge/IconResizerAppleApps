@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import UniformTypeIdentifiers
 
 private enum LabResizeCorner: CaseIterable, Hashable {
     case topLeading, topTrailing, bottomLeading, bottomTrailing
@@ -34,19 +33,6 @@ private struct BlogRectResizeSession {
 }
 
 struct ImageCropLabView: View {
-    /// Finder file drops use `fileURL`; include common image UTIs so `onDrop` accepts the drag.
-    private static let labImageDropTypes: [UTType] = [
-        .fileURL,
-        .image,
-        .png,
-        .jpeg,
-        .tiff,
-        .gif,
-        .webP,
-        .heic,
-        .icns
-    ]
-    
     @ObservedObject var vm: IconResizerViewModel
     @State private var dragTranslation: CGSize = .zero
     @State private var isDropTargeted = false
@@ -125,7 +111,7 @@ struct ImageCropLabView: View {
                                 .lineLimit(3)
                                 .textSelection(.enabled)
                         } else {
-                            Text("Default: Desktop/Apple Icons — same as Web headers / icons when no custom folder is set (see non–Image lab modes).")
+                            Text("Default: Downloads/Apple Icons when no custom folder is set (sandbox); use Choose folder… for Desktop.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -582,7 +568,7 @@ struct ImageCropLabView: View {
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: 12))
-            .onDrop(of: Self.labImageDropTypes, isTargeted: $isDropTargeted) { providers in
+            .onDrop(of: ImageDropImportTypes.utTypes, isTargeted: $isDropTargeted) { providers in
                 vm.handleDrop(providers: providers)
                 return true
             }

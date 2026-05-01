@@ -11,10 +11,27 @@ import Combine
 import CoreImage
 import UniformTypeIdentifiers
 
+/// SwiftUI `onDrop` UTTypes for dragging images from Finder — shared by main window, Image lab, and collage.
+/// **`fileURL` is listed first** so sandboxed file drops match the same path as the lab (see `ImageCropLabView` drop zone).
+enum ImageDropImportTypes {
+    static let utTypes: [UTType] = [
+        .fileURL,
+        .image,
+        .png,
+        .jpeg,
+        .tiff,
+        .gif,
+        .webP,
+        .heic,
+        .icns,
+    ]
+}
+
 enum OperationMode: String, CaseIterable {
     case icons = "App Icons"
     case screenshots = "App Screenshots"
     case blogHeaders = "Web headers"
+    case adsenseLogo = "AdSense logo"
     case imageLab = "Image lab"
 }
 
@@ -164,7 +181,7 @@ class IconResizerViewModel: ObservableObject {
     @Published var playFeatureGraphicReserveBottomSafe: Bool = true
     /// When true, exports go into `base/<subfolder>` (e.g. BlogHeaders, AndroidIcons). When false, files are written directly into `base` (no extra wrapper folder).
     @Published var createExportSubfolder: Bool = false
-    /// When set, **all** default exports (Image lab, Web headers, icons, screenshots) use this folder as the base instead of `Desktop/Apple Icons` / the sandbox mirror. Choose via the open panel so macOS grants write access.
+    /// When set, **all** default exports (Image lab, Web headers, icons, screenshots) use this folder as the base instead of `~/Downloads/Apple Icons`. Choose via the open panel so macOS grants write access elsewhere (e.g. Desktop).
     @Published var labExportParentURL: URL? = nil
     
     // MARK: - Image lab (square crop in image pixels) + multi-image collage
@@ -637,11 +654,11 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
-    /// `~/Desktop/Apple Icons` for the current user (must match a non-sandboxed build, or exports need the folder picker).
+    /// Sandboxed default: **`~/Downloads/Apple Icons`** (`com.apple.security.files.downloads.read-write`). Desktop is not writable without choosing a folder via the open panel.
     private var defaultExportBaseFolder: URL {
-        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
-        return desktop.appendingPathComponent("Apple Icons", isDirectory: true)
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        return downloads.appendingPathComponent("Apple Icons", isDirectory: true)
     }
     
     /// Resolves the folder that receives export files for a given base (default `Apple Icons` or a folder chosen in the open panel).
@@ -659,6 +676,48 @@ class IconResizerViewModel: ObservableObject {
         labExportParentURL ?? defaultExportBaseFolder
     }
     
+    /// Custom export base from `NSOpenPanel` — keep security-scoped access open until replaced or cleared.
+    private func setLabExportParentURL(_ url: URL?) {
+        if let old = labExportParentURL {
+            old.stopAccessingSecurityScopedResource()
+        }
+        labExportParentURL = url
+        if let url {
+            _ = url.startAccessingSecurityScopedResource()
+        }
+    }
+    
+    /// Read an image from a URL returned by `NSOpenPanel`. Call only **synchronously** inside the panel’s completion handler (before async hops).
+    /// Returns `systemError` from `Data(contentsOf:)` so timeouts / I/O failures surface in the UI instead of a vague “could not read”.
+    private func loadImageFromPickedFileURL(_ url: URL) -> (image: NSImage?, systemError: String?) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            if let img = NSImage(data: data) {
+                return (img, nil)
+            }
+            if let img = NSImage(contentsOf: url) {
+                return (img, nil)
+            }
+            return (nil, "Read \(data.count) bytes from \(url.lastPathComponent) but it isn’t a supported image format.")
+        } catch {
+            return (nil, error.localizedDescription)
+        }
+    }
+    
+    /// Sandboxed apps behave more reliably when the open panel is a **sheet** on the key window.
+    private func runOpenPanelAsSheetIfPossible(_ panel: NSOpenPanel, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.keyWindow {
+            panel.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            panel.begin(completionHandler: completion)
+        }
+    }
+    
     /// Pick an **existing** folder. Use New Folder in the lower-left to create and enter one, then select Open.
     func chooseLabExportParentExisting() {
         let panel = NSOpenPanel()
@@ -674,7 +733,7 @@ class IconResizerViewModel: ObservableObject {
                 return
             }
             DispatchQueue.main.async {
-                self.labExportParentURL = u
+                self.setLabExportParentURL(u)
                 self.labLog("Custom export base: \(u.path)")
                 self.statusMessage = "✅ Exports will save under: \(u.path)"
             }
@@ -718,7 +777,7 @@ class IconResizerViewModel: ObservableObject {
                 let newURL = parentURL.appendingPathComponent(name, isDirectory: true)
                 do {
                     try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: true, attributes: nil)
-                    self.labExportParentURL = newURL
+                    self.setLabExportParentURL(newURL)
                     self.labLog("Created export base: \(newURL.path)")
                     self.statusMessage = "✅ Exports will use new folder: \(name)"
                 } catch {
@@ -735,11 +794,11 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
-    /// Clears a custom base so exports use the default `Desktop/Apple Icons` path again.
+    /// Clears a custom base so exports use the default `~/Downloads/Apple Icons` path again.
     func useDefaultLabExportParent() {
-        labExportParentURL = nil
-        labLog("Export base: default (Desktop/Apple Icons)")
-        statusMessage = "Using default export location (Desktop/Apple Icons)"
+        setLabExportParentURL(nil)
+        labLog("Export base: default (Downloads/Apple Icons)")
+        statusMessage = "Using default export location (Downloads/Apple Icons)"
     }
     
     /// Reveals the most recent successful export in Finder, or the folder the current mode would use next (creates it if needed).
@@ -771,58 +830,212 @@ class IconResizerViewModel: ObservableObject {
             return base
         case .blogHeaders:
             return resolvedExportFolder(base: base, subfolder: "BlogHeaders")
+        case .adsenseLogo:
+            return resolvedExportFolder(base: base, subfolder: "AdSenseLogo")
         case .imageLab:
             return resolvedExportFolder(base: base, subfolder: "ImageLabExports")
         }
     }
     
-    /// Finder often supplies file URLs or `public.image` instead of raw PNG bytes; try several representations.
+    /// Decode a dropped **file** URL inside security scope (Finder / sandbox drags).
+    private func decodeImageFromDroppedFileURL(_ fileURL: URL) -> NSImage? {
+        guard fileURL.isFileURL else { return nil }
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { fileURL.stopAccessingSecurityScopedResource() }
+        }
+        if let data = try? Data(contentsOf: fileURL), let img = NSImage(data: data) {
+            return img
+        }
+        return NSImage(contentsOf: fileURL)
+    }
+    
+    /// `loadItem` can return `URL`, `NSURL`, bookmark `Data`, or UTF‑8 path / `file:` string.
+    private func urlFromSecureCodingItem(_ item: NSSecureCoding?) -> URL? {
+        if let u = item as? URL { return u }
+        if let ns = item as? NSURL { return ns as URL }
+        guard let data = item as? Data else { return nil }
+        let bookmarkOptionSets: [[URL.BookmarkResolutionOptions]] = [
+            [.withSecurityScope, .withoutUI],
+            [.withSecurityScope],
+            [.withoutUI],
+            [],
+        ]
+        for opts in bookmarkOptionSets {
+            var stale = false
+            let combined = opts.reduce(URL.BookmarkResolutionOptions()) { $0.union($1) }
+            if let resolved = try? URL(
+                resolvingBookmarkData: data,
+                options: combined,
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ) {
+                return resolved
+            }
+        }
+        if let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if raw.hasPrefix("/") {
+                return URL(fileURLWithPath: raw)
+            }
+            if let u = URL(string: raw), u.isFileURL {
+                return u
+            }
+        }
+        return nil
+    }
+    
+    /// Finder / SwiftUI may supply several providers (promised types vs file). Try each until one yields an image.
+    private func loadImageFromFirstWorkingProvider(_ providers: [NSItemProvider], completion: @escaping (NSImage?) -> Void) {
+        func attempt(_ index: Int) {
+            guard index < providers.count else {
+                completion(nil)
+                return
+            }
+            loadImageFromItemProvider(providers[index]) { img in
+                if let img = img {
+                    completion(img)
+                } else {
+                    attempt(index + 1)
+                }
+            }
+        }
+        attempt(0)
+    }
+    
+    /// Finder often supplies `NSURL` via `loadObject`, file representations, raw bytes, or bookmark `Data` — try several representations.
     private func loadImageFromItemProvider(_ provider: NSItemProvider, completion: @escaping (NSImage?) -> Void) {
         let dataTypes: [UTType] = [.png, .jpeg, .tiff, .gif, .webP, .heic, .image]
         
-        func tryDataTypes(at index: Int) {
+        func deliver(_ image: NSImage?) {
+            DispatchQueue.main.async { completion(image) }
+        }
+        
+        func stepLoadItemFileURL() {
+            let typeIds = [UTType.fileURL.identifier, UTType.url.identifier]
+            
+            func forceLoadItemFileURL() {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                    DispatchQueue.main.async {
+                        if error == nil,
+                           let url = self.urlFromSecureCodingItem(item),
+                           let img = self.decodeImageFromDroppedFileURL(url) {
+                            deliver(img)
+                        } else {
+                            deliver(nil)
+                        }
+                    }
+                }
+            }
+            
+            func tryLoadItem(index: Int) {
+                guard index < typeIds.count else {
+                    forceLoadItemFileURL()
+                    return
+                }
+                let tid = typeIds[index]
+                guard provider.hasItemConformingToTypeIdentifier(tid) else {
+                    tryLoadItem(index: index + 1)
+                    return
+                }
+                provider.loadItem(forTypeIdentifier: tid, options: nil) { item, error in
+                    DispatchQueue.main.async {
+                        if error == nil,
+                           let url = self.urlFromSecureCodingItem(item),
+                           let img = self.decodeImageFromDroppedFileURL(url) {
+                            deliver(img)
+                        } else {
+                            tryLoadItem(index: index + 1)
+                        }
+                    }
+                }
+            }
+            
+            tryLoadItem(index: 0)
+        }
+        
+        func stepDataTypes(_ index: Int) {
             if index >= dataTypes.count {
-                tryLoadFileURL()
+                stepLoadItemFileURL()
                 return
             }
             let type = dataTypes[index]
             provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
                 DispatchQueue.main.async {
                     if let data = data, let img = NSImage(data: data) {
-                        completion(img)
+                        deliver(img)
                     } else {
-                        tryDataTypes(at: index + 1)
+                        stepDataTypes(index + 1)
                     }
                 }
             }
         }
         
-        func tryLoadFileURL() {
-            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
-                completion(nil)
-                return
+        func stepFileRepresentations() {
+            let registered = provider.registeredTypeIdentifiers
+            let preferred = [
+                UTType.png.identifier, UTType.jpeg.identifier, UTType.tiff.identifier,
+                UTType.gif.identifier, UTType.webP.identifier, UTType.heic.identifier,
+                UTType.image.identifier, UTType.fileURL.identifier,
+            ]
+            var ordered: [String] = []
+            for p in preferred where registered.contains(p) {
+                if !ordered.contains(p) { ordered.append(p) }
             }
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                DispatchQueue.main.async {
-                    let fileURL: URL? = {
-                        if let u = item as? URL { return u }
-                        if let ns = item as? NSURL { return ns as URL }
-                        return nil
-                    }()
-                    guard let fileURL = fileURL else {
-                        completion(nil)
+            for r in registered where !ordered.contains(r) {
+                ordered.append(r)
+            }
+            if ordered.isEmpty {
+                ordered = preferred
+            }
+            
+            func tryRep(_ i: Int) {
+                guard i < ordered.count else {
+                    stepDataTypes(0)
+                    return
+                }
+                let id = ordered[i]
+                provider.loadFileRepresentation(forTypeIdentifier: id) { url, error in
+                    if error != nil || url == nil {
+                        DispatchQueue.main.async { tryRep(i + 1) }
                         return
                     }
-                    let scoped = fileURL.startAccessingSecurityScopedResource()
-                    defer {
-                        if scoped { fileURL.stopAccessingSecurityScopedResource() }
+                    guard let url = url else {
+                        DispatchQueue.main.async { tryRep(i + 1) }
+                        return
                     }
-                    completion(NSImage(contentsOf: fileURL))
+                    let img: NSImage? = {
+                        if let data = try? Data(contentsOf: url) { return NSImage(data: data) }
+                        return NSImage(contentsOf: url)
+                    }()
+                    DispatchQueue.main.async {
+                        if let img = img {
+                            deliver(img)
+                        } else {
+                            tryRep(i + 1)
+                        }
+                    }
                 }
+            }
+            tryRep(0)
+        }
+        
+        func startNSURLObject() {
+            if provider.canLoadObject(ofClass: NSURL.self) {
+                provider.loadObject(ofClass: NSURL.self) { obj, error in
+                    if error == nil,
+                       let nsurl = obj as? NSURL,
+                       let img = self.decodeImageFromDroppedFileURL(nsurl as URL) {
+                        deliver(img)
+                    } else {
+                        stepFileRepresentations()
+                    }
+                }
+            } else {
+                stepFileRepresentations()
             }
         }
         
-        tryDataTypes(at: 0)
+        startNSURLObject()
     }
     
     /// `NSImage` can list a small thumbnail `NSBitmapImageRep` before the full-size one; always pick the largest by pixel area.
@@ -1026,6 +1239,16 @@ class IconResizerViewModel: ObservableObject {
         ScreenshotConfig(filename: "header-1024x576.png", width: 1024, height: 576, description: "16:9 lighter")
     ]
     
+    /// Google AdSense privacy-message logo: 5:1, JPEG on white, tuned to stay ≤150 KB when possible.
+    let adSensePrivacyLogoSizes: [ScreenshotConfig] = [
+        ScreenshotConfig(
+            filename: "adsense-privacy-logo-1000x200.jpg",
+            width: 1000,
+            height: 200,
+            description: "Google AdSense privacy message logo (5:1, ≤150 KB)"
+        )
+    ]
+    
     // Android launcher legacy mipmaps (same artwork in each folder; typical Play / Studio layout).
     struct AndroidLauncherIconConfig {
         let mipmapFolder: String
@@ -1110,8 +1333,8 @@ class IconResizerViewModel: ObservableObject {
                     }
                 }
             } else {
-                guard let provider = providers.first else { return }
-                loadImageFromItemProvider(provider) { img in
+                guard !providers.isEmpty else { return }
+                loadImageFromFirstWorkingProvider(providers) { img in
                     guard let img = img else {
                         self.statusMessage = "❌ Could not load image from drop (try PNG/JPEG or drag the file again)"
                         self.labLog("Drop: no image from provider")
@@ -1121,11 +1344,11 @@ class IconResizerViewModel: ObservableObject {
                     self.statusMessage = "✅ Image loaded in Image lab"
                 }
             }
-        case .icons, .blogHeaders:
-            guard let provider = providers.first else { return }
-            loadImageFromItemProvider(provider) { img in
+        case .icons, .blogHeaders, .adsenseLogo:
+            guard !providers.isEmpty else { return }
+            loadImageFromFirstWorkingProvider(providers) { img in
                 guard let nsImage = img else {
-                    self.statusMessage = "❌ Could not load image from drop. Exported PNGs from Finder: try dropping again, or use File ▸ Open in Preview then copy."
+                    self.statusMessage = "❌ Could not load image from drop. Use Choose image… in the box above (same as Image lab), or try dragging again."
                     return
                 }
                 switch mode {
@@ -1133,12 +1356,103 @@ class IconResizerViewModel: ObservableObject {
                     self.resizeAndSaveIcons(sourceImage: nsImage)
                 case .blogHeaders:
                     self.resizeAndSaveBlogHeaders(sourceImage: nsImage)
+                case .adsenseLogo:
+                    self.resizeAndSaveAdSenseLogo(sourceImage: nsImage)
                 case .screenshots, .imageLab:
                     break
                 }
             }
         case .screenshots:
             resizeAndSaveMultipleScreenshots(providers: providers)
+        }
+    }
+    
+    /// Same engines as drag-and-drop, but **`NSOpenPanel` → `NSImage(contentsOf:)`** — the path Image lab uses for **Choose image…** and reliably works in the sandbox when Finder drops fail.
+    func openImageViaFilePickerForCurrentMode() {
+        dismissLabChooseImagePanelIfNeeded()
+        let mode = operationMode
+        if mode == .imageLab {
+            chooseLabImageFile(appendAsCollage: false)
+            return
+        }
+        let panel = NSOpenPanel()
+        // Empty array = allow any file type (user may pick uncommon extensions); we decode with NSImage.
+        panel.allowedContentTypes = []
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        switch mode {
+        case .screenshots:
+            panel.allowsMultipleSelection = true
+            panel.message = "Choose one or more screenshots to resize"
+        case .icons:
+            panel.message = "Choose an icon source image (PNG or JPEG)"
+            panel.allowsMultipleSelection = false
+        case .blogHeaders:
+            panel.message = "Choose an image for web header export"
+            panel.allowsMultipleSelection = false
+        case .adsenseLogo:
+            panel.message = "Choose a logo for the AdSense privacy upload"
+            panel.allowsMultipleSelection = false
+        case .imageLab:
+            return
+        }
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        runOpenPanelAsSheetIfPossible(panel) { [weak self] response in
+            guard let self else { return }
+            var loadedSingle: NSImage?
+            var loadedMany: [NSImage] = []
+            var readErrorDetail: String?
+            if response == .OK {
+                switch mode {
+                case .screenshots:
+                    for url in panel.urls {
+                        let r = self.loadImageFromPickedFileURL(url)
+                        if let img = r.image {
+                            loadedMany.append(img)
+                        } else if readErrorDetail == nil, let err = r.systemError {
+                            readErrorDetail = err
+                        }
+                    }
+                case .icons, .blogHeaders, .adsenseLogo:
+                    if let url = panel.url {
+                        let r = self.loadImageFromPickedFileURL(url)
+                        loadedSingle = r.image
+                        readErrorDetail = r.systemError
+                    }
+                case .imageLab:
+                    break
+                }
+            }
+            DispatchQueue.main.async {
+                guard response == .OK else { return }
+                switch mode {
+                case .icons, .blogHeaders, .adsenseLogo:
+                    guard let img = loadedSingle else {
+                        let hint = readErrorDetail.map { ": \($0)" } ?? ""
+                        self.statusMessage = "❌ Could not read the selected image\(hint)"
+                        return
+                    }
+                    switch mode {
+                    case .icons:
+                        self.resizeAndSaveIcons(sourceImage: img)
+                    case .blogHeaders:
+                        self.resizeAndSaveBlogHeaders(sourceImage: img)
+                    case .adsenseLogo:
+                        self.resizeAndSaveAdSenseLogo(sourceImage: img)
+                    default:
+                        break
+                    }
+                case .screenshots:
+                    guard !loadedMany.isEmpty else {
+                        let hint = readErrorDetail.map { " (\($0))" } ?? ""
+                        self.statusMessage = "❌ Could not read any selected images\(hint)"
+                        return
+                    }
+                    self.processMultipleScreenshots(images: loadedMany)
+                case .imageLab:
+                    break
+                }
+            }
         }
     }
     
@@ -1212,6 +1526,92 @@ class IconResizerViewModel: ObservableObject {
                 }
                 self.lastOutputFolder = outputFolderURL
                 print("📂 Blog headers: \(outputFolderURL.path)")
+            } catch {
+                self.isProcessing = false
+                self.statusMessage = "❌ Error: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    private func resizeAndSaveAdSenseLogo(sourceImage: NSImage, exportBase: URL? = nil) {
+        self.isProcessing = true
+        self.statusMessage = "🔄 Generating AdSense privacy logo..."
+        
+        let baseFolder = exportBase ?? self.effectiveLabExportBase
+        let outputFolderURL = resolvedExportFolder(base: baseFolder, subfolder: "AdSenseLogo")
+        let fileManager = FileManager.default
+        
+        do {
+            try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
+            self.performAdSenseLogoProcessing(sourceImage: sourceImage, outputFolderURL: outputFolderURL)
+        } catch {
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                self.showSavePanelForAdSenseLogo(sourceImage: sourceImage)
+            }
+        }
+    }
+    
+    private func showSavePanelForAdSenseLogo(sourceImage: NSImage) {
+        let savePanel = NSOpenPanel()
+        savePanel.title = "Choose Output Folder"
+        savePanel.message = "Choose the folder to write into. With “category subfolder” on in the app, an AdSenseLogo folder is added inside; with direct export, files go right in the folder you pick."
+        savePanel.canChooseFiles = false
+        savePanel.canChooseDirectories = true
+        savePanel.canCreateDirectories = true
+        savePanel.allowsMultipleSelection = false
+        savePanel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
+        
+        savePanel.begin { response in
+            guard response == .OK, let selectedURL = savePanel.url else {
+                self.statusMessage = "❌ Cancelled"
+                return
+            }
+            let outputFolderURL = self.resolvedExportFolder(base: selectedURL, subfolder: "AdSenseLogo")
+            self.isProcessing = true
+            self.statusMessage = "🔄 Generating AdSense privacy logo..."
+            self.performAdSenseLogoProcessing(sourceImage: sourceImage, outputFolderURL: outputFolderURL)
+        }
+    }
+    
+    private func performAdSenseLogoProcessing(sourceImage: NSImage, outputFolderURL: URL) {
+        DispatchQueue.main.async {
+            let workImage = self.flattenImageForIconPipeline(sourceImage) ?? sourceImage
+            let fileManager = FileManager.default
+            do {
+                try fileManager.createDirectory(at: outputFolderURL, withIntermediateDirectories: true)
+                var totalGenerated = 0
+                var lastDetail: String?
+                for config in self.adSensePrivacyLogoSizes {
+                    if let fitted = self.resizeAspectFit(
+                        image: workImage,
+                        width: config.width,
+                        height: config.height,
+                        background: .white
+                    ) {
+                        let fileURL = outputFolderURL.appendingPathComponent(config.filename)
+                        if let result = self.saveJPEGUnderByteLimit(image: fitted, to: fileURL) {
+                            totalGenerated += 1
+                            let kb = Double(result.bytes) / 1024.0
+                            if result.underLimit {
+                                lastDetail = String(format: "✅ Saved \(config.filename) — %.1f KB, JPEG q=%.2f (≤150 KB)", kb, result.quality)
+                            } else {
+                                lastDetail = String(format: "⚠️ Saved \(config.filename) — %.1f KB at q=%.2f (still above 150 KB; simplify artwork or reduce source detail)", kb, result.quality)
+                            }
+                            print("✅ AdSense logo: \(config.filename)")
+                        } else {
+                            lastDetail = "❌ Could not encode JPEG for \(config.filename)"
+                        }
+                    }
+                }
+                self.isProcessing = false
+                if totalGenerated == 0 {
+                    self.statusMessage = lastDetail ?? "❌ No AdSense logo file was written. Try another folder or check permissions for \(outputFolderURL.path)."
+                } else {
+                    self.statusMessage = lastDetail ?? "✅ AdSense privacy logo saved"
+                }
+                self.lastOutputFolder = outputFolderURL
+                print("📂 AdSense logo: \(outputFolderURL.path)")
             } catch {
                 self.isProcessing = false
                 self.statusMessage = "❌ Error: \(error.localizedDescription)"
@@ -2208,6 +2608,60 @@ class IconResizerViewModel: ObservableObject {
         }
     }
     
+    /// JPEG bytes at `compressionFactor` (0…1). Prefers existing bitmap reps; falls back via TIFF round-trip like `savePNGWithError`.
+    private func jpegData(from image: NSImage, compressionFactor: CGFloat) -> Data? {
+        let factor = min(1, max(0, compressionFactor))
+        let props: [NSBitmapImageRep.PropertyKey: Any] = [.compressionFactor: factor]
+        for rep in image.representations {
+            guard let bmp = rep as? NSBitmapImageRep else { continue }
+            if let data = bmp.representation(using: .jpeg, properties: props) {
+                return data
+            }
+        }
+        guard let tiffData = image.tiffRepresentation,
+              let bitmapImage = NSBitmapImageRep(data: tiffData),
+              let data = bitmapImage.representation(using: .jpeg, properties: props) else {
+            return nil
+        }
+        return data
+    }
+    
+    /// Writes JPEG, trying descending quality until `maxBytes` is met; if none fit, writes the smallest attempt and returns `underLimit: false`.
+    private func saveJPEGUnderByteLimit(
+        image: NSImage,
+        to url: URL,
+        maxBytes: Int = 150_000
+    ) -> (bytes: Int, quality: CGFloat, underLimit: Bool)? {
+        let qualities: [CGFloat] = [0.92, 0.85, 0.78, 0.70, 0.60, 0.50, 0.40]
+        var bestOver: (data: Data, quality: CGFloat)?
+        var bestOverSize = Int.max
+        
+        for q in qualities {
+            guard let data = jpegData(from: image, compressionFactor: q) else { continue }
+            if data.count <= maxBytes {
+                do {
+                    try data.write(to: url)
+                    return (data.count, q, true)
+                } catch {
+                    print("❌ Failed to save JPEG \(url.lastPathComponent): \(error)")
+                    return nil
+                }
+            }
+            if data.count < bestOverSize {
+                bestOverSize = data.count
+                bestOver = (data, q)
+            }
+        }
+        guard let pair = bestOver else { return nil }
+        do {
+            try pair.data.write(to: url)
+            return (pair.data.count, pair.quality, false)
+        } catch {
+            print("❌ Failed to save JPEG \(url.lastPathComponent): \(error)")
+            return nil
+        }
+    }
+    
     private func generateIOSContentsJSON(at folderURL: URL) {
         var images: [[String: Any]] = []
         
@@ -3024,45 +3478,71 @@ class IconResizerViewModel: ObservableObject {
             ? "Choose one or more images to add to the lab"
             : (labCompositingMode == .collage ? "Choose an image to add" : "Choose an image for the lab")
         labChooseImageOpenPanel = panel
-        panel.begin { response in
+        panel.allowedContentTypes = []
+        runOpenPanelAsSheetIfPossible(panel) { [weak self] response in
+            guard let self else { return }
+            var loaded: [(NSImage, String)] = []
+            var lastReadError: String?
+            if response == .OK {
+                if multi, !panel.urls.isEmpty {
+                    for url in panel.urls {
+                        let r = self.loadImageFromPickedFileURL(url)
+                        if let img = r.image {
+                            loaded.append((img, url.lastPathComponent))
+                        } else {
+                            self.labLog("Failed to read \(url.lastPathComponent): \(r.systemError ?? "?")")
+                            if lastReadError == nil { lastReadError = r.systemError }
+                        }
+                    }
+                } else if let url = panel.url {
+                    let r = self.loadImageFromPickedFileURL(url)
+                    if let img = r.image {
+                        loaded.append((img, url.lastPathComponent))
+                    } else {
+                        lastReadError = r.systemError
+                    }
+                }
+            }
             DispatchQueue.main.async {
+                defer { self.dismissLabChooseImagePanelIfNeeded() }
                 switch response {
                 case .OK:
                     if multi, !panel.urls.isEmpty {
-                        if self.labCompositingMode == .collage {
-                            self.pushCollageUndoBeforeMutation()
-                        }
-                        for url in panel.urls {
-                            if let img = NSImage(contentsOf: url) {
-                                self.appendLabImage(img, recordUndo: false)
-                            } else {
-                                self.labLog("Failed to read \(url.lastPathComponent)")
-                            }
-                        }
-                        self.statusMessage = "✅ Added \(panel.urls.count) image(s)"
-                    } else if let url = panel.url {
-                        guard let img = NSImage(contentsOf: url) else {
-                            self.dismissLabChooseImagePanelIfNeeded()
-                            self.labLog("Failed to read image at \(url.lastPathComponent)")
+                        guard !loaded.isEmpty else {
+                            let hint = lastReadError.map { " (\($0))" } ?? ""
+                            self.statusMessage = "❌ Could not read any of the selected images\(hint)"
                             return
                         }
                         if self.labCompositingMode == .collage {
+                            self.pushCollageUndoBeforeMutation()
+                        }
+                        for item in loaded {
+                            self.appendLabImage(item.0, recordUndo: false)
+                        }
+                        self.statusMessage = "✅ Added \(loaded.count) image(s)"
+                    } else if let url = panel.url {
+                        guard let first = loaded.first else {
+                            self.labLog("Failed to read image at \(url.lastPathComponent)")
+                            let hint = lastReadError.map { ": \($0)" } ?? ""
+                            self.statusMessage = "❌ Could not read image\(hint)"
+                            return
+                        }
+                        let img = first.0
+                        let name = first.1
+                        if self.labCompositingMode == .collage {
                             self.appendLabImage(img)
-                            self.statusMessage = "✅ Added \(url.lastPathComponent)"
+                            self.statusMessage = "✅ Added \(name)"
                         } else {
                             self.setSingleLabImage(img)
-                            self.statusMessage = "✅ Loaded \(url.lastPathComponent)"
+                            self.statusMessage = "✅ Loaded \(name)"
                         }
                     } else {
-                        self.dismissLabChooseImagePanelIfNeeded()
                         self.labLog("Open panel: no URL")
-                        return
+                        self.statusMessage = "❌ No file chosen"
                     }
                 default:
-                    self.dismissLabChooseImagePanelIfNeeded()
                     self.labLog("Open panel cancelled")
                 }
-                self.dismissLabChooseImagePanelIfNeeded()
             }
         }
     }

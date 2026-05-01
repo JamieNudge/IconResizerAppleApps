@@ -235,7 +235,7 @@ Logs: left sidebar console.
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
             } else {
-                Text("Default: a folder called “Apple Icons” on your Desktop. If saving fails with a permission error, use Choose folder and pick (or create) a folder so macOS can grant write access.")
+                Text("Default: a folder “Apple Icons” inside Downloads (sandbox allows this). For Desktop or elsewhere, use Choose folder… so macOS grants access.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.leading)
@@ -302,7 +302,7 @@ Logs: left sidebar console.
                 }
             }
             
-            if resizer.operationMode != .blogHeaders && resizer.operationMode != .imageLab {
+            if resizer.operationMode != .blogHeaders && resizer.operationMode != .adsenseLogo && resizer.operationMode != .imageLab {
                 labeledSegmentedGroup(title: "Store") {
                     Picker("", selection: $resizer.storeSelection) {
                         ForEach(StoreSelection.allCases, id: \.self) { store in
@@ -389,32 +389,47 @@ Logs: left sidebar console.
                     .padding(.top, 8)
             }
             
-            // Drop zone
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(style: StrokeStyle(lineWidth: 3, dash: [10]))
-                    .foregroundColor(resizer.isTargeted ? .blue : .gray)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(resizer.isTargeted ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
-                    )
-                
-                VStack(spacing: 16) {
-                    Image(systemName: resizer.isTargeted ? "arrow.down.circle.fill" : "arrow.down.circle")
-                        .font(.system(size: 50))
+            // Drop zone — match Image lab: no Button inside the `onDrop` view (macOS hit-testing + drag delivery).
+            VStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(style: StrokeStyle(lineWidth: 3, dash: [10]))
                         .foregroundColor(resizer.isTargeted ? .blue : .gray)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(resizer.isTargeted ? Color.blue.opacity(0.1) : Color.gray.opacity(0.05))
+                        )
                     
-                    Text(resizer.isTargeted ? "Drop PNG here" : "Drag PNG here")
-                        .font(.title3)
-                        .foregroundColor(resizer.isTargeted ? .blue : .secondary)
+                    VStack(spacing: 16) {
+                        Image(systemName: resizer.isTargeted ? "arrow.down.circle.fill" : "arrow.down.circle")
+                            .font(.system(size: 50))
+                            .foregroundColor(resizer.isTargeted ? .blue : .gray)
+                        
+                        Text(resizer.isTargeted ? "Drop image here" : "Drag image here")
+                            .font(.title3)
+                            .foregroundColor(resizer.isTargeted ? .blue : .secondary)
+                    }
                 }
+                .frame(height: 200)
+                .frame(maxWidth: .infinity)
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+                .onDrop(of: ImageDropImportTypes.utTypes, isTargeted: $resizer.isTargeted) { providers in
+                    resizer.handleDrop(providers: providers)
+                    return true
+                }
+                
+                Button("Choose image…") {
+                    resizer.openImageViaFilePickerForCurrentMode()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                Text("Same engines as Image lab; button is outside the drop surface so Finder drags aren’t eaten by hit-testing.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 320)
             }
-            .frame(height: 200)
             .padding(.horizontal, 40)
-            .onDrop(of: [.png, .image], isTargeted: $resizer.isTargeted) { providers in
-                resizer.handleDrop(providers: providers)
-                return true
-            }
             
             // Status
             if !resizer.statusMessage.isEmpty {
@@ -460,8 +475,18 @@ Logs: left sidebar console.
                     Text("• 1600 × 900px — 16:9 retina")
                     Text("• 1024 × 576px — 16:9 lighter")
                     Text(resizer.createExportSubfolder
-                         ? "• Saved to Desktop/Apple Icons/BlogHeaders/"
-                         : "• Saved to Desktop/Apple Icons/")
+                         ? "• Saved to Downloads/Apple Icons/BlogHeaders/"
+                         : "• Saved to Downloads/Apple Icons/")
+                        .foregroundColor(.green)
+                } else if resizer.operationMode == .adsenseLogo {
+                    Text("Google AdSense — privacy message logo")
+                        .font(.caption.bold())
+                    Text("• 1000 × 200px (5:1) — aspect-fit on white, JPEG")
+                    Text("• File size tuned to stay ≤150 KB when possible (Google upload limit)")
+                    Text("• Google accepts PNG or JPG; this mode exports JPG")
+                    Text(resizer.createExportSubfolder
+                         ? "• Saved to Downloads/Apple Icons/AdSenseLogo/ as adsense-privacy-logo-1000x200.jpg"
+                         : "• Saved to Downloads/Apple Icons/ as adsense-privacy-logo-1000x200.jpg")
                         .foregroundColor(.green)
                 } else if resizer.operationMode == .icons {
                     Text("Generates:")
@@ -472,8 +497,8 @@ Logs: left sidebar console.
                         Text("• play-store/ic_launcher-512.png (512×512, 32-bit PNG w/ alpha — aim ≤1MB)")
                         Text("• play-store/feature-graphic-1024x500 — always 1024×500 px, full-bleed fill + aspect-fit mark (see Feature graphic)")
                         Text(resizer.createExportSubfolder
-                             ? "• Saved under Desktop/Apple Icons/AndroidIcons/"
-                             : "• Saved under Desktop/Apple Icons/ (res/, play-store/)")
+                             ? "• Saved under Downloads/Apple Icons/AndroidIcons/"
+                             : "• Saved under Downloads/Apple Icons/ (res/, play-store/)")
                             .foregroundColor(.green)
                     } else {
                         if resizer.selectedPlatform == .iOSUniversal {
@@ -531,8 +556,8 @@ Logs: left sidebar console.
                     }
                     
                     Text(resizer.createExportSubfolder
-                         ? "• Auto-saves under Desktop/Apple Icons/<device>_Screenshots/"
-                         : "• Auto-saves to Desktop/Apple Icons/")
+                         ? "• Auto-saves under Downloads/Apple Icons/<device>_Screenshots/"
+                         : "• Auto-saves to Downloads/Apple Icons/")
                         .foregroundColor(.green)
                 }
             }
@@ -563,6 +588,7 @@ Logs: left sidebar console.
         case .icons: return "photo.on.rectangle.angled"
         case .screenshots: return "photo.stack"
         case .blogHeaders: return "rectangle.expand.vertical"
+        case .adsenseLogo: return "rectangle.compress.vertical"
         case .imageLab: return "square.dashed.inset.filled"
         }
     }
@@ -572,6 +598,7 @@ Logs: left sidebar console.
         case .icons: return "Icon Resizer"
         case .screenshots: return "Screenshot Resizer"
         case .blogHeaders: return "Web header export"
+        case .adsenseLogo: return "AdSense privacy logo"
         case .imageLab: return "Image lab"
         }
     }
@@ -584,6 +611,8 @@ Logs: left sidebar console.
             return "Drop multiple screenshots - orientation auto-detected"
         case .blogHeaders:
             return "Drop one PNG — images are scaled and center-cropped to each preset (like object-cover)"
+        case .adsenseLogo:
+            return "Drop a logo — exports a 1000×200 (5:1) JPG on white, auto-tuned to stay under 150 KB"
         case .imageLab:
             return "Crop or collage, then save PNGs, app icons, web headers, or store screenshots"
         }

@@ -7,7 +7,6 @@
 
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 private enum CanvasFrameCorner: CaseIterable, Hashable {
     case topLeading, topTrailing, bottomLeading, bottomTrailing
@@ -37,11 +36,6 @@ private enum BlogResizeHandle: Hashable {
 }
 
 struct CollageCanvasEditorView: View {
-    /// Must match `ImageCropLabView` / Finder-acceptable types (including `fileURL` for files dragged from a folder).
-    private static let imageDropUTTypes: [UTType] = [
-        .fileURL, .image, .png, .jpeg, .tiff, .gif, .webP, .heic, .icns
-    ]
-    
     @ObservedObject var vm: IconResizerViewModel
     @Binding var isDropTargeted: Bool
     @State private var lastMoveDeltaCarry: CGSize = .zero
@@ -86,7 +80,7 @@ struct CollageCanvasEditorView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
-        .onDrop(of: Self.imageDropUTTypes, isTargeted: $isDropTargeted) { providers in
+        .onDrop(of: ImageDropImportTypes.utTypes, isTargeted: $isDropTargeted) { providers in
             vm.handleDrop(providers: providers)
             return true
         }
